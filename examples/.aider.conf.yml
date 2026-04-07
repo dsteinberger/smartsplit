@@ -1,0 +1,5 @@
+# SmartSplit config for Aider
+# Copy to your project root as .aider.conf.yml
+model: openai/smartsplit
+openai-api-base: http://localhost:8420/v1
+openai-api-key: free

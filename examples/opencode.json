@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "smartsplit": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SmartSplit",
+      "options": {
+        "baseURL": "http://localhost:8420/v1"
+      },
+      "models": {
+        "smartsplit": {
+          "name": "SmartSplit (auto-routing)"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.claude/
+tests/
+scripts/
+*.md
+!README.md
+LICENSE
+.mcp.json
+.dockerignore
+Dockerfile

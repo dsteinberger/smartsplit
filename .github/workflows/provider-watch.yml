@@ -1,0 +1,65 @@
+name: Provider Watch (Daily)
+
+on:
+  schedule:
+    # Every day at 8:00 UTC
+    - cron: "0 8 * * *"
+  workflow_dispatch: # Manual trigger
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Run provider watch
+        env:
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          REPORT_OUTPUT: report.md
+        run: python scripts/provider_watch.py
+
+      - name: Check if report has action items
+        id: check
+        run: |
+          if grep -q "No action needed" report.md; then
+            echo "has_actions=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_actions=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub issue
+        if: steps.check.outputs.has_actions == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Provider Watch — $(date -u +%Y-%m-%d)"
+          gh issue create \
+            --title "$TITLE" \
+            --body-file report.md \
+            --label "provider-watch,automated"
+
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-watch-report
+          path: report.md
+          retention-days: 30

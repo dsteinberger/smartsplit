@@ -1,0 +1,247 @@
+[
+  {
+    "id": "mono-code-01",
+    "category": "mono-domain",
+    "expected_domains": ["code"],
+    "prompt": "Write a Python function that implements binary search on a sorted list. Include type hints and handle edge cases."
+  },
+  {
+    "id": "mono-code-02",
+    "category": "mono-domain",
+    "expected_domains": ["code"],
+    "prompt": "Implement a LRU cache in Python using collections.OrderedDict with get and put methods in O(1) time."
+  },
+  {
+    "id": "mono-math-01",
+    "category": "mono-domain",
+    "expected_domains": ["math"],
+    "prompt": "Calculate the probability of rolling at least two sixes when throwing five fair dice. Show the step-by-step calculation."
+  },
+  {
+    "id": "mono-factual-01",
+    "category": "mono-domain",
+    "expected_domains": ["factual"],
+    "prompt": "What is the capital of New Zealand and what is its population as of the most recent census?"
+  },
+  {
+    "id": "mono-creative-01",
+    "category": "mono-domain",
+    "expected_domains": ["creative"],
+    "prompt": "Write a short poem about the feeling of debugging code late at night when you finally find the bug."
+  },
+  {
+    "id": "mono-translation-01",
+    "category": "mono-domain",
+    "expected_domains": ["translation"],
+    "prompt": "Translate the following sentence to French: 'The quick brown fox jumps over the lazy dog while contemplating the meaning of existence.'"
+  },
+  {
+    "id": "mono-reasoning-01",
+    "category": "mono-domain",
+    "expected_domains": ["reasoning"],
+    "prompt": "Compare the pros and cons of microservices architecture versus monolithic architecture for a startup with a team of 5 developers."
+  },
+  {
+    "id": "mono-summarize-01",
+    "category": "mono-domain",
+    "expected_domains": ["summarize"],
+    "prompt": "Summarize the key principles of the Agile software development methodology in 3 bullet points."
+  },
+  {
+    "id": "mono-extraction-01",
+    "category": "mono-domain",
+    "expected_domains": ["extraction"],
+    "prompt": "Extract all the programming languages mentioned in this text: 'Our team uses Python for data science, TypeScript for the frontend, Rust for the CLI tools, and Go for the microservices. We also have some legacy Java code.'"
+  },
+  {
+    "id": "mono-code-03",
+    "category": "mono-domain",
+    "expected_domains": ["code"],
+    "prompt": "Write a JavaScript function that debounces any callback function with a configurable delay. Include JSDoc comments."
+  },
+  {
+    "id": "mono-reasoning-02",
+    "category": "mono-domain",
+    "expected_domains": ["reasoning"],
+    "prompt": "Should a bootstrapped SaaS startup prioritize growth or profitability in its first two years? Analyze the tradeoffs."
+  },
+  {
+    "id": "mono-math-02",
+    "category": "mono-domain",
+    "expected_domains": ["math"],
+    "prompt": "Solve the equation 3x^2 - 12x + 9 = 0 using the quadratic formula. Show all steps."
+  },
+  {
+    "id": "mono-creative-02",
+    "category": "mono-domain",
+    "expected_domains": ["creative"],
+    "prompt": "Write a marketing tagline for a new AI-powered coffee machine that learns your taste preferences over time."
+  },
+  {
+    "id": "mono-factual-02",
+    "category": "mono-domain",
+    "expected_domains": ["factual"],
+    "prompt": "What is the difference between TCP and UDP protocols? When would you use each one?"
+  },
+  {
+    "id": "mono-code-04",
+    "category": "mono-domain",
+    "expected_domains": ["code"],
+    "prompt": "Write a Python decorator that retries a function up to 3 times with exponential backoff if it raises an exception."
+  },
+  {
+    "id": "multi-simple-01",
+    "category": "multi-domain-simple",
+    "expected_domains": ["code", "writing"],
+    "prompt": "Fix this Python bug: `def add(a, b): return a - b` and write a clear user-facing error message explaining what the function does."
+  },
+  {
+    "id": "multi-simple-02",
+    "category": "multi-domain-simple",
+    "expected_domains": ["code", "translation"],
+    "prompt": "Write a Python function that validates email addresses using regex, and translate the docstring to French."
+  },
+  {
+    "id": "multi-simple-03",
+    "category": "multi-domain-simple",
+    "expected_domains": ["math", "code"],
+    "prompt": "Calculate the first 20 Fibonacci numbers mathematically, then write a Python generator that yields them."
+  },
+  {
+    "id": "multi-simple-04",
+    "category": "multi-domain-simple",
+    "expected_domains": ["reasoning", "code"],
+    "prompt": "Compare Redis vs Memcached for session caching, then write a Python class that implements a simple session store using the winner."
+  },
+  {
+    "id": "multi-simple-05",
+    "category": "multi-domain-simple",
+    "expected_domains": ["extraction", "summarize"],
+    "prompt": "Extract all the dates and monetary amounts from this text and summarize the key financial events: 'On January 15, 2024, the company raised $50M in Series B. By March 2024, revenue hit $2M MRR. The $10M Series A was closed in June 2023.'"
+  },
+  {
+    "id": "multi-simple-06",
+    "category": "multi-domain-simple",
+    "expected_domains": ["code", "reasoning"],
+    "prompt": "Analyze whether async/await or threading is better for I/O-bound tasks in Python, then implement a concrete example of the better approach."
+  },
+  {
+    "id": "multi-simple-07",
+    "category": "multi-domain-simple",
+    "expected_domains": ["factual", "translation"],
+    "prompt": "What are the three largest cities in Japan by population? List them with their population numbers and translate the answer to Spanish."
+  },
+  {
+    "id": "multi-simple-08",
+    "category": "multi-domain-simple",
+    "expected_domains": ["creative", "code"],
+    "prompt": "Invent a funny variable naming convention for a pirate-themed codebase, then write a Python class using that convention that manages a treasure inventory."
+  },
+  {
+    "id": "multi-simple-09",
+    "category": "multi-domain-simple",
+    "expected_domains": ["code", "writing"],
+    "prompt": "Write a SQL query that finds the top 10 customers by total order value, and draft a brief email to the product team explaining what insights this query reveals."
+  },
+  {
+    "id": "multi-simple-10",
+    "category": "multi-domain-simple",
+    "expected_domains": ["math", "writing"],
+    "prompt": "Calculate the compound interest on $10,000 at 5% annual rate over 10 years, then write a paragraph explaining this concept to a teenager who has never heard of investing."
+  },
+  {
+    "id": "multi-complex-01",
+    "category": "multi-domain-complex",
+    "expected_domains": ["web_search", "code", "writing"],
+    "prompt": "Research the latest features of Python 3.13, write a function that demonstrates the best new feature, and draft a blog post paragraph about it."
+  },
+  {
+    "id": "multi-complex-02",
+    "category": "multi-domain-complex",
+    "expected_domains": ["code", "math", "writing"],
+    "prompt": "Implement a Monte Carlo simulation in Python to estimate Pi, explain the mathematical proof behind why it works, and write documentation for the function."
+  },
+  {
+    "id": "multi-complex-03",
+    "category": "multi-domain-complex",
+    "expected_domains": ["extraction", "reasoning", "code"],
+    "prompt": "Parse this JSON API response to extract user data: {\"users\": [{\"name\": \"Alice\", \"age\": 30}, {\"name\": \"Bob\", \"age\": 25}]}, analyze which data validation rules should apply, then write a Pydantic model with validators."
+  },
+  {
+    "id": "multi-complex-04",
+    "category": "multi-domain-complex",
+    "expected_domains": ["code", "translation", "writing"],
+    "prompt": "Write a Python CLI tool that converts temperatures between Celsius and Fahrenheit, translate all user-facing strings to French, and write a README section explaining usage."
+  },
+  {
+    "id": "multi-complex-05",
+    "category": "multi-domain-complex",
+    "expected_domains": ["reasoning", "math", "code"],
+    "prompt": "Compare quicksort vs mergesort: analyze their time complexity mathematically for best/worst/average cases, recommend which to use for a dataset of 1 million records, then implement the recommended one in Python."
+  },
+  {
+    "id": "multi-complex-06",
+    "category": "multi-domain-complex",
+    "expected_domains": ["extraction", "code", "writing"],
+    "prompt": "Extract all function signatures from this Python code: 'def foo(x: int) -> str: pass\\ndef bar(a, b=10): return a+b\\nasync def baz() -> None: await sleep(1)', generate a test file with pytest tests for each, and write a brief code review."
+  },
+  {
+    "id": "multi-complex-07",
+    "category": "multi-domain-complex",
+    "expected_domains": ["reasoning", "code", "creative"],
+    "prompt": "Evaluate whether FastAPI or Flask is better for a small REST API, implement a hello-world endpoint with the winner, and write a creative analogy explaining the choice to a non-technical manager."
+  },
+  {
+    "id": "multi-complex-08",
+    "category": "multi-domain-complex",
+    "expected_domains": ["math", "code", "translation"],
+    "prompt": "Solve the system of equations: 2x + 3y = 12, 4x - y = 5. Then write a Python function that solves any 2x2 system using Cramer's rule. Finally, translate the function's docstring to German."
+  },
+  {
+    "id": "multi-complex-09",
+    "category": "multi-domain-complex",
+    "expected_domains": ["factual", "reasoning", "writing"],
+    "prompt": "What are the SOLID principles in software engineering? Evaluate which one is most commonly violated in practice and why. Write a memo to a junior developer explaining that principle with a concrete example."
+  },
+  {
+    "id": "multi-complex-10",
+    "category": "multi-domain-complex",
+    "expected_domains": ["code", "math", "extraction", "writing"],
+    "prompt": "Parse this CSV data to extract sales figures: 'Q1,1200\\nQ2,1800\\nQ3,1500\\nQ4,2100', calculate the quarterly growth rates, write a Python function that generates a text-based bar chart, and draft an executive summary of the trends."
+  },
+  {
+    "id": "multi-turn-01",
+    "category": "multi-turn",
+    "expected_domains": ["code"],
+    "messages": [
+      {"role": "system", "content": "You are a Python expert."},
+      {"role": "user", "content": "Write a function to validate email addresses"},
+      {"role": "assistant", "content": "Here's a basic email validator using regex:\n\n```python\nimport re\n\ndef validate_email(email: str) -> bool:\n    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$'\n    return bool(re.match(pattern, email))\n```"},
+      {"role": "user", "content": "Now add support for plus addressing and make it case-insensitive"}
+    ],
+    "prompt": "Now add support for plus addressing and make it case-insensitive"
+  },
+  {
+    "id": "multi-turn-02",
+    "category": "multi-turn",
+    "expected_domains": ["code", "reasoning"],
+    "messages": [
+      {"role": "system", "content": "You are helping build a REST API with FastAPI."},
+      {"role": "user", "content": "We have a User model with name and email fields"},
+      {"role": "assistant", "content": "Understood. A basic User model with name and email."},
+      {"role": "user", "content": "Add password hashing with bcrypt and explain why we should never store plain text passwords"}
+    ],
+    "prompt": "Add password hashing with bcrypt and explain why we should never store plain text passwords"
+  },
+  {
+    "id": "multi-turn-03",
+    "category": "multi-turn",
+    "expected_domains": ["code"],
+    "messages": [
+      {"role": "user", "content": "I'm building a CLI tool in Python with argparse"},
+      {"role": "assistant", "content": "Got it, a CLI tool with argparse."},
+      {"role": "user", "content": "Add a --verbose flag and a subcommand 'run' that takes a filename argument"}
+    ],
+    "prompt": "Add a --verbose flag and a subcommand 'run' that takes a filename argument"
+  }
+]

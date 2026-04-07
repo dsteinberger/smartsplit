@@ -1,0 +1,73 @@
+"""Google Gemini provider — free tier, strong for summaries, reasoning, and code."""
+
+from __future__ import annotations
+
+import httpx
+
+from smartsplit.exceptions import ProviderError
+from smartsplit.models import TokenUsage
+from smartsplit.providers.base import _EMPTY_USAGE, LLMProvider, _http_error_message
+
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+class GeminiProvider(LLMProvider):
+    name = "gemini"
+
+    async def complete(
+        self,
+        prompt: str,
+        model: str | None = None,
+        messages: list[dict[str, str]] | None = None,
+    ) -> tuple[str, TokenUsage]:
+        url = _GEMINI_URL.format(model=model or self.config.model)
+
+        # Convert messages to Gemini format, merging consecutive same-role messages
+        if messages:
+            contents: list[dict[str, str | list[dict[str, str]]]] = []
+            for msg in messages:
+                role = "model" if msg["role"] == "assistant" else "user"
+                text = msg["content"]
+                # Gemini forbids consecutive messages with same role — merge them
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"][0]["text"] += "\n\n" + text
+                else:
+                    contents.append({"role": role, "parts": [{"text": text}]})
+        else:
+            contents = [{"parts": [{"text": prompt}]}]
+
+        try:
+            response = await self.http.post(
+                url,
+                headers={"x-goog-api-key": self.api_key},
+                json={
+                    "contents": contents,
+                    "generationConfig": {
+                        "temperature": self.config.temperature,
+                        "maxOutputTokens": self.config.max_tokens,
+                    },
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise ProviderError(self.name, _http_error_message(e)) from e
+        except httpx.TimeoutException as e:
+            raise ProviderError(self.name, "Request timed out") from e
+
+        try:
+            data = response.json()
+        except ValueError as e:
+            raise ProviderError(self.name, "Invalid JSON in API response") from e
+        content = self._extract(data, "candidates", 0, "content", "parts", 0, "text")
+
+        usage_meta = data.get("usageMetadata")
+        if usage_meta:
+            prompt_t = usage_meta.get("promptTokenCount", 0)
+            completion_t = usage_meta.get("candidatesTokenCount", 0)
+            usage = TokenUsage(
+                prompt_tokens=prompt_t, completion_tokens=completion_t, total_tokens=prompt_t + completion_t
+            )
+        else:
+            usage = _EMPTY_USAGE
+
+        return content, usage

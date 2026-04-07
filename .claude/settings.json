@@ -1,0 +1,15 @@
+  {
+    "permissions": {
+      "allow": [
+        "Bash(source .venv/bin/activate*)",
+        "Bash(python -m pytest*)",
+        "Bash(python -m smartsplit*)",
+        "Bash(pip install*)",
+        "Bash(timeout*)",
+        "Bash(ls*)",
+        "Bash(mkdir*)",
+        "Bash(rm -f*)"
+      ]
+    }
+  }
+

@@ -1,0 +1,11 @@
+{
+  "models": [
+    {
+      "title": "SmartSplit",
+      "provider": "openai",
+      "model": "smartsplit",
+      "apiBase": "http://localhost:8420/v1",
+      "apiKey": "free"
+    }
+  ]
+}

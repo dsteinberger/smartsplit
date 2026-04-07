@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Environment / secrets
+.env
+.env.*
+smartsplit.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+benchmarks/results/
+opencode.json
+.aider*
+.continuerc.json
