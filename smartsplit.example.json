@@ -1,0 +1,57 @@
+{
+  "mode": "balanced",
+  "providers": {
+    "groq": {
+      "api_key": "YOUR_GROQ_API_KEY",
+      "type": "free",
+      "enabled": true
+    },
+    "cerebras": {
+      "api_key": "YOUR_CEREBRAS_API_KEY",
+      "type": "free",
+      "enabled": false
+    },
+    "gemini": {
+      "api_key": "YOUR_GEMINI_API_KEY",
+      "type": "free",
+      "enabled": true
+    },
+    "deepseek": {
+      "api_key": "YOUR_DEEPSEEK_API_KEY",
+      "type": "free",
+      "enabled": false
+    },
+    "openrouter": {
+      "api_key": "YOUR_OPENROUTER_API_KEY",
+      "type": "free",
+      "enabled": false
+    },
+    "serper": {
+      "api_key": "YOUR_SERPER_API_KEY",
+      "type": "free",
+      "enabled": true
+    },
+    "tavily": {
+      "api_key": "YOUR_TAVILY_API_KEY",
+      "type": "free",
+      "enabled": false
+    },
+    "mistral": {
+      "api_key": "YOUR_MISTRAL_API_KEY",
+      "type": "free",
+      "enabled": false
+    },
+    "anthropic": {
+      "api_key": "YOUR_ANTHROPIC_API_KEY",
+      "type": "paid",
+      "enabled": false,
+      "daily_budget_tokens": 100000
+    },
+    "openai": {
+      "api_key": "YOUR_OPENAI_API_KEY",
+      "type": "paid",
+      "enabled": false,
+      "daily_budget_tokens": 100000
+    }
+  }
+}
