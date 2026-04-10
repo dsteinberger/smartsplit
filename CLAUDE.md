@@ -2,7 +2,7 @@
 
 ## What is this project?
 
-SmartSplit is a **free multi-LLM backend** — an OpenAI-compatible endpoint that routes each request to the best free LLM for the task. Code goes to DeepSeek, search to Serper, translation to Mistral, reasoning to Gemini. Works with Continue, Cline, Aider, or any OpenAI-compatible client.
+SmartSplit is a **free multi-LLM backend** — an OpenAI-compatible endpoint that routes each request to the best free LLM for the task. Code goes to OpenRouter, search to Serper, translation to Mistral, reasoning to Cerebras. Works with Continue, Cline, Aider, or any OpenAI-compatible client.
 
 Target: developers without paid API subscriptions who want an intelligent AI coding assistant for free.
 
@@ -11,9 +11,9 @@ Target: developers without paid API subscriptions who want an intelligent AI cod
 ```
 smartsplit/
   proxy.py           # HTTP server: Starlette app, LLM-based triage (RESPOND/ENRICH), CLI
-  formats.py         # OpenAI/Anthropic request/response conversion + SSE streaming
+  formats.py         # OpenAI request/response conversion + SSE streaming
   planner.py         # Decomposes prompts via free LLM, synthesizes results, LRU cache
-  router.py          # Scores providers (Quality × Availability × Budget), routes subtasks
+  router.py          # Scores providers (Quality + Cost + Availability, additive weighted), routes subtasks
   learning.py        # MAB (UCB1) adaptive scoring — auto-calibrates from real results
   quota.py           # Usage tracking, availability scores, savings report
   config.py          # Pydantic config, env var loading, defaults
@@ -41,13 +41,9 @@ smartsplit/
 ## How to verify changes
 
 ```bash
-source .venv/bin/activate && python -m pytest tests/ -v
+make check    # lint + format check + tests
 ```
-All tests must pass.
-
-```bash
-timeout 3 python -m smartsplit 2>&1 || true
-```
+All tests must pass. No API key needed — tests are fully mocked.
 
 ## Code conventions
 

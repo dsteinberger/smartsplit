@@ -97,7 +97,8 @@ Your coding assistant (Continue, Cline, Aider, Cursor...)
 ### 1. Install
 
 ```bash
-pip install smartsplit
+pipx install smartsplit        # recommended on macOS/Linux
+# or: pip install smartsplit
 # or: uv pip install smartsplit
 ```
 
@@ -211,7 +212,7 @@ client = OpenAI(base_url="http://localhost:8420/v1", api_key="free")
 SmartSplit works with **any tool that supports a custom OpenAI endpoint**: Continue, Cline, Aider, OpenCode, Tabby, Void, Cursor, Open WebUI, Chatbox, LibreChat, Jan, and more.
 </details>
 
-**That's it.** Three steps: install, add one API key, connect your tool. Your assistant now has access to every top free LLM.
+**That's it.** Install, add one API key, start, connect your tool. Your assistant now has access to every top free LLM.
 
 ---
 
@@ -272,7 +273,7 @@ SmartSplit passes your **full conversation history** to the LLM — system promp
 | **Cerebras** | Free | Reasoning, general (Qwen 3 235B) |
 | **Groq** | Free | Fast inference (LLaMA 3.3 70B) |
 | **Gemini** | Free | Math, reasoning (Gemini 2.5 Flash) |
-| **OpenRouter** | Free | Code (Qwen3 Coder 480B) |
+| **OpenRouter** | Free | Code (Qwen3 Coder) |
 | **Mistral** | Free | Translation (Mistral Small) |
 | **HuggingFace** | Free backup | Code (Qwen2.5 Coder 32B) |
 | **Cloudflare** | Free backup | General (LLaMA 3.3 70B) |
