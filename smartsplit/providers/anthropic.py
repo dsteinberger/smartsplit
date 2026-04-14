@@ -17,6 +17,7 @@ class AnthropicProvider(LLMProvider):
         prompt: str,
         model: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        extra_body: dict | None = None,
     ) -> tuple[str, TokenUsage]:
         # Anthropic format: separate system messages from user/assistant messages
         api_messages = []

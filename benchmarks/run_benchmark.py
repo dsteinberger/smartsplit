@@ -70,10 +70,38 @@ def _cerebras_call(prompt: str, api_key: str) -> dict:
     }
 
 
+def _openrouter_call(prompt: str, api_key: str) -> dict:
+    return {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "headers": {"Authorization": f"Bearer {api_key}"},
+        "body": {
+            "model": "qwen/qwen3-coder:free",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        },
+    }
+
+
+def _mistral_call(prompt: str, api_key: str) -> dict:
+    return {
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "headers": {"Authorization": f"Bearer {api_key}"},
+        "body": {
+            "model": "mistral-small-latest",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        },
+    }
+
+
 BASELINE_FACTORIES = {
     "groq": ("GROQ_API_KEY", _groq_call),
     "gemini": ("GEMINI_API_KEY", _gemini_call),
     "cerebras": ("CEREBRAS_API_KEY", _cerebras_call),
+    "openrouter": ("OPENROUTER_API_KEY", _openrouter_call),
+    "mistral": ("MISTRAL_API_KEY", _mistral_call),
 }
 
 
@@ -188,10 +216,33 @@ async def call_baseline_cerebras(
     return content, tokens
 
 
+async def call_baseline_openai_compat(
+    http: httpx.AsyncClient,
+    prompt: str,
+    api_key: str,
+    factory_fn: callable,
+) -> tuple[str, int]:
+    """Generic caller for any OpenAI-compatible provider."""
+    cfg = factory_fn(prompt, api_key)
+    response = await http.post(
+        cfg["url"],
+        headers=cfg["headers"],
+        json=cfg["body"],
+        timeout=60.0,
+    )
+    response.raise_for_status()
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+    tokens = data.get("usage", {}).get("total_tokens", len(content) // 4)
+    return content, tokens
+
+
 BASELINE_CALLERS = {
     "groq": call_baseline_groq,
     "gemini": call_baseline_gemini,
     "cerebras": call_baseline_cerebras,
+    "openrouter": lambda http, prompt, key: call_baseline_openai_compat(http, prompt, key, _openrouter_call),
+    "mistral": lambda http, prompt, key: call_baseline_openai_compat(http, prompt, key, _mistral_call),
 }
 
 
@@ -199,19 +250,96 @@ BASELINE_CALLERS = {
 
 
 JUDGE_PROMPT = """\
-You are a strict evaluator. Rate the following AI response on a scale of 1-10.
+You are a strict AI response evaluator. Rate the following response on a scale of 1-10.
 
-Criteria:
-- Completeness: Does the response address ALL parts of the prompt?
-- Accuracy: Is the information correct?
-- Coherence: Is the response well-structured and easy to follow?
-- Quality: Is the code correct (if applicable)? Is the writing good?
+Be discriminating — most responses should score between 5 and 8. Reserve 9-10 for exceptional quality.
+
+Scoring rubric:
+- Correctness (0-3): Is the information/code accurate? Would the code actually run? Any factual errors?
+- Completeness (0-3): Does it address ALL parts of the prompt? Missing any requested element = max 1 here.
+- Clarity (0-2): Is it well-structured? Easy to follow? Good formatting?
+- Quality (0-2): Depth of analysis, code quality, writing sophistication. Generic/shallow = 0.
+
+Evaluate each criterion, explain briefly (1-2 sentences per criterion), then give your total.
+Output your final score on the last line in this exact format: [[score]]
 
 Prompt: {prompt}
 
-Response: {response}
+Response: {response}"""
 
-Output ONLY a single integer from 1 to 10, nothing else."""
+PAIRWISE_PROMPT = """\
+You are an expert AI response evaluator. Compare these two responses to the same prompt.
+
+Prompt: {prompt}
+
+--- Response A ---
+{response_a}
+
+--- Response B ---
+{response_b}
+
+Which response is better? Consider correctness, completeness, clarity, and quality.
+Briefly explain your reasoning (2-3 sentences), then output your verdict on the last line:
+- [[A]] if Response A is better
+- [[B]] if Response B is better
+- [[tie]] if they are roughly equal"""
+
+
+# Judge provider config — uses Cerebras (not Groq) to avoid self-bias
+# since Groq is a common baseline.
+_JUDGE_PROVIDERS = [
+    ("CEREBRAS_API_KEY", "https://api.cerebras.ai/v1/chat/completions", "qwen-3-235b-a22b-instruct-2507"),
+    ("GEMINI_API_KEY", "", ""),  # special: Gemini uses different format
+    ("GROQ_API_KEY", "https://api.groq.com/openai/v1/chat/completions", "llama-3.3-70b-versatile"),
+]
+
+
+def _find_judge_provider() -> tuple[str, str, str, str]:
+    """Find the best available judge provider (prefer one NOT used as baseline)."""
+    import os
+
+    for env_var, url, model in _JUDGE_PROVIDERS:
+        key = os.environ.get(env_var, "")
+        if key:
+            return env_var, url, model, key
+    return "", "", "", ""
+
+
+async def _call_judge_llm(http: httpx.AsyncClient, text: str, url: str, model: str, api_key: str) -> str:
+    """Call the judge LLM and return raw text response."""
+    resp = await http.post(
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": text}],
+            "temperature": 0.0,
+            "max_tokens": 500,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def _extract_score(text: str) -> float:
+    """Extract [[score]] from judge response."""
+    import re
+
+    match = re.search(r"\[\[(\d+(?:\.\d+)?)\]\]", text)
+    if match:
+        return min(float(match.group(1)), 10.0)
+    # Fallback: try to find a bare number at the end
+    match = re.search(r"(\d+(?:\.\d+)?)\s*$", text)
+    return min(float(match.group(1)), 10.0) if match else 0.0
+
+
+def _extract_pairwise(text: str) -> str:
+    """Extract [[A]], [[B]], or [[tie]] from judge response."""
+    import re
+
+    match = re.search(r"\[\[(A|B|tie)\]\]", text, re.IGNORECASE)
+    return match.group(1).upper() if match else "TIE"
 
 
 async def judge_response(
@@ -219,27 +347,46 @@ async def judge_response(
     prompt: str,
     response: str,
     api_key: str,
+    judge_url: str = "",
+    judge_model: str = "",
 ) -> float:
-    """Use Groq (free) as LLM-as-judge to score a response."""
+    """Use LLM-as-judge to score a response (1-10) with chain-of-thought."""
+    if not judge_url or not judge_model:
+        return 0.0
+
     judge_text = JUDGE_PROMPT.replace("{prompt}", prompt).replace("{response}", response[:2000])
 
     try:
-        resp = await http.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "user", "content": judge_text}],
-                "temperature": 0.0,
-                "max_tokens": 5,
-            },
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        score_text = resp.json()["choices"][0]["message"]["content"].strip()
-        return float(score_text)
+        raw = await _call_judge_llm(http, judge_text, judge_url, judge_model, api_key)
+        return _extract_score(raw)
     except Exception:
         return 0.0
+
+
+async def judge_pairwise(
+    http: httpx.AsyncClient,
+    prompt: str,
+    response_a: str,
+    response_b: str,
+    api_key: str,
+    judge_url: str = "",
+    judge_model: str = "",
+) -> str:
+    """Pairwise comparison: returns 'A', 'B', or 'TIE'."""
+    if not judge_url or not judge_model:
+        return "TIE"
+
+    text = (
+        PAIRWISE_PROMPT.replace("{prompt}", prompt)
+        .replace("{response_a}", response_a[:1500])
+        .replace("{response_b}", response_b[:1500])
+    )
+
+    try:
+        raw = await _call_judge_llm(http, text, judge_url, judge_model, api_key)
+        return _extract_pairwise(raw)
+    except Exception:
+        return "TIE"
 
 
 # ── Main benchmark runner ─────────────────────────────────────
@@ -269,8 +416,14 @@ async def run_benchmark(
         else:
             api_keys[name] = key
 
+    # Find judge provider (prefer one not used as baseline to avoid self-bias)
+    judge_env, judge_url, judge_model, judge_key_auto = _find_judge_provider()
     if not judge_key:
-        judge_key = os.environ.get("GROQ_API_KEY", "")
+        judge_key = judge_key_auto
+    if judge_env:
+        print(f"  Judge: {judge_env} ({judge_model})")
+    judge_url = judge_url or ""
+    judge_model = judge_model or ""
 
     all_results: list[BenchmarkResult] = []
 
@@ -339,24 +492,23 @@ async def run_benchmark(
 
                 all_results.append(result)
 
-                # Rate limit protection — longer delay to avoid cross-contamination
-                # between SmartSplit (which uses providers internally) and direct baselines
-                await asyncio.sleep(1.5)
+                # Rate limit protection — generous delay to avoid cross-contamination
+                # between SmartSplit (which uses providers internally) and direct baselines.
+                # Free tiers have strict rpm limits (Gemini: 15rpm, Cerebras: 30rpm).
+                await asyncio.sleep(4.0)
 
-        # Judge phase
-        if use_judge and judge_key:
-            print(f"\n  Judging {len(all_results)} responses...")
+        # Judge phase — absolute scoring
+        if use_judge and judge_key and judge_url:
+            print(f"\n  Scoring {len(all_results)} responses...")
             for i, result in enumerate(all_results):
                 if result.success and result.response:
                     prompt = next(e["prompt"] for e in dataset if e["id"] == result.prompt_id)
                     result.judge_score = await judge_response(
-                        http,
-                        prompt,
-                        result.response,
-                        judge_key,
+                        http, prompt, result.response, judge_key,
+                        judge_url=judge_url, judge_model=judge_model,
                     )
                     print(f"  [{i + 1}/{len(all_results)}] {result.prompt_id}/{result.method}: {result.judge_score}/10")
-                    await asyncio.sleep(0.3)  # rate limit
+                    await asyncio.sleep(2.0)  # rate limit — judge provider has limits too
 
     # Build report
     report = BenchmarkReport(
@@ -388,10 +540,16 @@ def _build_summary(
     methods: list[str],
     dataset: list[dict],
 ) -> dict:
-    """Compute aggregate stats per method and category."""
+    """Compute aggregate stats per method, category, and domain."""
     categories = sorted(set(e["category"] for e in dataset))
 
-    summary: dict = {"by_method": {}, "by_category": {}}
+    # Build domain lookup: prompt_id -> primary domain
+    domain_lookup: dict[str, str] = {}
+    for entry in dataset:
+        domains = entry.get("expected_domains", ["general"])
+        domain_lookup[entry["id"]] = domains[0] if domains else "general"
+
+    summary: dict = {"by_method": {}, "by_category": {}, "by_domain": {}}
 
     for method in methods:
         method_results = [r for r in results if r.method == method]
@@ -420,6 +578,24 @@ def _build_summary(
                 "avg_judge_score": round(
                     sum(r.judge_score for r in cat_results if r.judge_score > 0)
                     / max(sum(1 for r in cat_results if r.judge_score > 0), 1),
+                    2,
+                ),
+            }
+
+    # By domain (code, reasoning, translation, etc.)
+    all_domains = sorted(set(domain_lookup.values()))
+    for domain in all_domains:
+        domain_prompt_ids = {pid for pid, d in domain_lookup.items() if d == domain}
+        summary["by_domain"][domain] = {}
+        for method in methods:
+            domain_results = [
+                r for r in results if r.prompt_id in domain_prompt_ids and r.method == method and r.success
+            ]
+            scored = [r for r in domain_results if r.judge_score > 0]
+            summary["by_domain"][domain][method] = {
+                "count": len(domain_results),
+                "avg_judge_score": round(
+                    sum(r.judge_score for r in scored) / max(len(scored), 1),
                     2,
                 ),
             }
@@ -494,6 +670,24 @@ def print_report(report: BenchmarkReport) -> None:
         for method, stats in methods_stats.items():
             score_str = f"{stats['avg_judge_score']:.1f}" if stats["avg_judge_score"] else "n/a"
             print(f"    {method:<13} {stats['avg_latency_ms']:>7}ms  score={score_str}")
+
+    # By domain
+    if "by_domain" in report.summary and any(
+        any(s.get("avg_judge_score", 0) > 0 for s in d.values())
+        for d in report.summary["by_domain"].values()
+    ):
+        print("\n  By Domain (judge scores):")
+        header = f"  {'Domain':<14}"
+        for method in report.methods:
+            header += f" {method:>12}"
+        print(header)
+        print("  " + "-" * (14 + 13 * len(report.methods)))
+        for domain, methods_stats in report.summary["by_domain"].items():
+            row = f"  {domain:<14}"
+            for method in report.methods:
+                score = methods_stats.get(method, {}).get("avg_judge_score", 0)
+                row += f" {score:>11.1f}" if score else f" {'n/a':>11}"
+            print(row)
 
     # Win rates
     if "win_rates" in report.summary:

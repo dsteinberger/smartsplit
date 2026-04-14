@@ -238,6 +238,28 @@ class TestQualityGates:
         )
         assert Router.passes_quality_gate(response, subtask)
 
+    def test_padded_refusal_beyond_scan_length_passes(self):
+        """A refusal hidden beyond the 80-char scan window is NOT caught.
+
+        This is a known trade-off: short scan avoids false positives on
+        legitimate responses that start with 'I apologize...'. Padded
+        refusals that start beyond 80 chars slip through.
+        """
+        subtask = Subtask(type=TaskType.GENERAL, content="test", complexity=Complexity.LOW)
+        # Pad beyond 80 chars, then refusal pattern
+        response = (
+            "Thank you for the interesting question. Let me think about this carefully. "
+            + "I cannot help with that request."
+        )
+        # The refusal starts at position ~76, but the padding pushes it beyond scan range
+        assert Router.passes_quality_gate(response, subtask)
+
+    def test_short_refusal_within_scan_length_fails(self):
+        """A refusal within the 80-char scan window is correctly caught."""
+        subtask = Subtask(type=TaskType.GENERAL, content="test", complexity=Complexity.LOW)
+        response = "I'm sorry, but I cannot help with that particular request."
+        assert not Router.passes_quality_gate(response, subtask)
+
     @pytest.mark.asyncio
     async def test_quality_gate_escalation_in_balanced_mode(self, make_config, tmp_path):
         """In balanced mode, a low-quality response should trigger escalation to next provider."""
@@ -445,3 +467,63 @@ class TestTierLogic:
         free = ProviderConfig(type=ProviderType.FREE)
         assert _get_model_for_tier(free, "fast") is None
         assert _get_model_for_tier(free, "strong") is None
+
+
+# ── Provider overrides ──────────────────────────────────────
+
+
+class TestProviderOverrides:
+    @pytest.mark.asyncio
+    async def test_override_forces_provider(self, make_config, tmp_path):
+        """Override should force the specified provider for the task type."""
+        config = make_config(["groq", "anthropic"], overrides={"code": "anthropic"})
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Mock the LLM call
+        provider = registry.get("anthropic")
+        provider.complete = AsyncMock(return_value=("result from anthropic", TokenUsage()))
+
+        subtask = Subtask(type=TaskType.CODE, content="write a function", complexity=Complexity.HIGH)
+        result = await router.route(subtask)
+        assert result.provider == "anthropic"
+
+    @pytest.mark.asyncio
+    async def test_override_fallback_when_circuit_breaker_open(self, make_config, tmp_path):
+        """If overridden provider is down, fallback to normal scoring."""
+        config = make_config(["groq", "anthropic"], overrides={"code": "anthropic"})
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Open circuit breaker for anthropic
+        registry.circuit_breaker._open_until["anthropic"] = time.time() + 9999
+
+        # Mock groq (the fallback)
+        provider = registry.get("groq")
+        provider.complete = AsyncMock(return_value=("result from groq", TokenUsage()))
+
+        subtask = Subtask(type=TaskType.CODE, content="write a function", complexity=Complexity.HIGH)
+        result = await router.route(subtask)
+        assert result.provider == "groq"
+
+    @pytest.mark.asyncio
+    async def test_override_ignored_when_provider_not_configured(self, make_config, tmp_path):
+        """Override for a provider that doesn't exist should be ignored."""
+        config = make_config(["groq"], overrides={"code": "anthropic"})
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        provider = registry.get("groq")
+        provider.complete = AsyncMock(return_value=("result from groq", TokenUsage()))
+
+        subtask = Subtask(type=TaskType.CODE, content="write a function", complexity=Complexity.HIGH)
+        result = await router.route(subtask)
+        assert result.provider == "groq"
+
+    def test_no_overrides_by_default(self, make_config):
+        """Config without overrides should have empty dict."""
+        config = make_config(["groq"])
+        assert config.overrides == {}

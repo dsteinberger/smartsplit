@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -63,7 +62,6 @@ class QuotaTracker:
         self._savings: dict[str, int] = {"free_calls": 0, "paid_calls": 0, "estimated_tokens_saved": 0}
         self._dirty = False
         self._last_save: float = 0.0
-        self._lock = asyncio.Lock()
 
         # Build limits from config (single source of truth)
         self._limits: dict[str, int] = {}
@@ -151,7 +149,7 @@ class QuotaTracker:
             self._path.chmod(0o600)
             self._dirty = False
         except OSError as e:
-            logger.warning(f"Could not save quota data: {e}")
+            logger.warning("Could not save quota data: %s", e)
 
     def _load(self) -> None:
         try:
@@ -160,4 +158,4 @@ class QuotaTracker:
                 self._usage = data.get("usage", {})
                 self._savings = data.get("savings", self._savings)
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning(f"Could not load quota data: {e}")
+            logger.warning("Could not load quota data: %s", e)

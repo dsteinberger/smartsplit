@@ -12,6 +12,8 @@ _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:g
 
 
 class GeminiProvider(LLMProvider):
+    """Google Gemini provider — free tier, strong for summaries and reasoning."""
+
     name = "gemini"
 
     async def complete(
@@ -19,6 +21,7 @@ class GeminiProvider(LLMProvider):
         prompt: str,
         model: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        extra_body: dict | None = None,
     ) -> tuple[str, TokenUsage]:
         url = _GEMINI_URL.format(model=model or self.config.model)
 
@@ -46,6 +49,9 @@ class GeminiProvider(LLMProvider):
                         "temperature": self.config.temperature,
                         "maxOutputTokens": self.config.max_tokens,
                     },
+                    # Disable tool use — Gemini may attempt grounding/search tool calls
+                    # which return no text content. SmartSplit handles search externally.
+                    "toolConfig": {"functionCallingConfig": {"mode": "NONE"}},
                 },
             )
             response.raise_for_status()
@@ -58,6 +64,20 @@ class GeminiProvider(LLMProvider):
             data = response.json()
         except ValueError as e:
             raise ProviderError(self.name, "Invalid JSON in API response") from e
+
+        # Gemini may return candidates without content (safety filter blocks)
+        candidates = data.get("candidates", [])
+        if not candidates:
+            reason = data.get("promptFeedback", {}).get("blockReason", "unknown")
+            raise ProviderError(self.name, f"No candidates returned (blockReason={reason})")
+
+        candidate = candidates[0]
+        finish_reason = candidate.get("finishReason", "")
+
+        # Gemini omits 'content' when blocked (SAFETY, RECITATION, OTHER, etc.)
+        if "content" not in candidate:
+            raise ProviderError(self.name, f"No content in response (finishReason={finish_reason})")
+
         content = self._extract(data, "candidates", 0, "content", "parts", 0, "text")
 
         usage_meta = data.get("usageMetadata")

@@ -84,12 +84,15 @@ class LLMProvider(BaseProvider):
         prompt: str,
         model: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        extra_body: dict | None = None,
     ) -> tuple[str, TokenUsage]:
         """Send a prompt and return (completion_text, token_usage).
 
         If *messages* is provided, send the full conversation history.
         Otherwise, wrap *prompt* in a single user message.
         If *model* is provided, use it instead of the provider's default.
+        If *extra_body* is provided, merge it into the API request body
+        (used to pass through tools, tool_choice, etc. from the client).
         """
 
 
@@ -107,17 +110,21 @@ class OpenAICompatibleProvider(LLMProvider):
         prompt: str,
         model: str | None = None,
         messages: list[dict[str, str]] | None = None,
+        extra_body: dict | None = None,
     ) -> tuple[str, TokenUsage]:
+        body: dict = {
+            "model": model or self.config.model,
+            "messages": messages or [{"role": "user", "content": prompt}],
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        if extra_body:
+            body.update(extra_body)
         try:
             response = await self.http.post(
                 self.api_url,
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": model or self.config.model,
-                    "messages": messages or [{"role": "user", "content": prompt}],
-                    "temperature": self.config.temperature,
-                    "max_tokens": self.config.max_tokens,
-                },
+                json=body,
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:

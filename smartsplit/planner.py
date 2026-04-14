@@ -192,6 +192,9 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "current",
         "recent",
         "today",
+        "on the web",
+        "on the internet",
+        "online",
         str(datetime.now().year - 1),
         str(datetime.now().year),
         str(datetime.now().year + 1),
@@ -251,6 +254,16 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
+# Merge multilingual keywords into domain lists (deduplicated).
+from smartsplit.i18n_keywords import DOMAIN_KEYWORDS_I18N as _I18N  # noqa: E402
+
+for _lang_keywords in _I18N.values():
+    for _domain, _keywords in _lang_keywords.items():
+        if _domain in _DOMAIN_KEYWORDS:
+            _DOMAIN_KEYWORDS[_domain].extend(_keywords)
+for _domain in _DOMAIN_KEYWORDS:
+    _DOMAIN_KEYWORDS[_domain] = list(dict.fromkeys(_DOMAIN_KEYWORDS[_domain]))
+
 # Map keyword groups to TaskType values.
 _DOMAIN_TO_TASK_TYPE: dict[str, TaskType] = {
     "code": TaskType.CODE,
@@ -273,8 +286,8 @@ def detect_domains(prompt: str) -> list[tuple[str, float]]:
     """Keyword-based domain detection — fallback when LLM classification fails.
 
     Returns a sorted list of (domain, confidence) tuples where confidence
-    is a 0.0-1.0 score based on keyword hits. English-only by design;
-    the LLM classifier in ``classify_domains`` handles all languages.
+    is a 0.0-1.0 score based on keyword hits. Supports 9 languages via
+    i18n_keywords: EN, FR, ES, PT, DE, ZH, JA, KO, RU.
     """
     prompt_lower = prompt.lower()
 
@@ -282,7 +295,7 @@ def detect_domains(prompt: str) -> list[tuple[str, float]]:
     for domain, keywords in _DOMAIN_KEYWORDS.items():
         hits = sum(1 for kw in keywords if kw in prompt_lower)
         if hits > 0:
-            scores[domain] = max(hits * 0.1, hits / len(keywords))
+            scores[domain] = min(1.0, max(hits * 0.1, hits / len(keywords)))
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     return [(d, s) for d, s in ranked if s >= _DOMAIN_CONFIDENCE_THRESHOLD]
@@ -421,11 +434,11 @@ class Planner:
             # Filter to valid domains only
             domains = [d for d in parsed if isinstance(d, str) and d in _VALID_DOMAINS]
             if domains:
-                logger.info(f"LLM classified domains: {domains}")
+                logger.info("LLM classified domains: %s", domains)
                 return domains
             logger.warning("LLM returned no valid domains, falling back to keywords")
         except (SmartSplitError, json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.warning(f"LLM classification failed ({type(e).__name__}), falling back to keywords")
+            logger.warning("LLM classification failed (%s), falling back to keywords", type(e).__name__)
 
         # Fallback: keyword-based detection
         keyword_domains = detect_domains(prompt)
@@ -453,7 +466,7 @@ class Planner:
             if messages:
                 for st in cached:
                     st.messages = [dict(m) for m in messages]
-            logger.info(f"Cache hit — returning {len(cached)} cached subtask(s)")
+            logger.info("Cache hit — returning %s cached subtask(s)", len(cached))
             return cached
 
         # Quick path: very short prompts skip decomposition but still use domains
@@ -461,7 +474,7 @@ class Planner:
             task_type = TaskType.GENERAL
             if domains:
                 task_type = _DOMAIN_TO_TASK_TYPE.get(domains[0], TaskType.GENERAL)
-            logger.info(f"Prompt is short — skipping decomposition (type={task_type.value})")
+            logger.info("Prompt is short — skipping decomposition (type=%s)", task_type.value)
             result = [Subtask(type=task_type, content=prompt, complexity=Complexity.LOW, messages=messages)]
             self.cache.put(key, result)
             return result
@@ -469,17 +482,17 @@ class Planner:
         # Step 1: Use domains from triage if available, otherwise classify
         if domains:
             domain_names = domains
-            logger.info(f"Using triage domains: {domain_names}")
+            logger.info("Using triage domains: %s", domain_names)
         else:
             domain_names = await self.classify_domains(prompt)
-            logger.info(f"Detected domains: {domain_names}")
+            logger.info("Detected domains: %s", domain_names)
 
         # Step 2: Single domain or no clear domain → route direct, no decomposition
         if len(domain_names) <= 1:
             task_type = TaskType.GENERAL
             if domain_names:
                 task_type = _DOMAIN_TO_TASK_TYPE.get(domain_names[0], TaskType.GENERAL)
-            logger.info(f"Single domain '{domain_names[0] if domain_names else 'general'}' — routing direct")
+            logger.info("Single domain '%s' — routing direct", domain_names[0] if domain_names else "general")
             result = [Subtask(type=task_type, content=prompt, complexity=Complexity.MEDIUM, messages=messages)]
             self.cache.put(key, result)
             return result
@@ -511,7 +524,7 @@ class Planner:
 
             # Enforce max subtask limit
             if len(subtasks) > max_subtasks:
-                logger.warning(f"Truncating {len(subtasks)} subtasks to {max_subtasks} (mode={mode.value})")
+                logger.warning("Truncating %s subtasks to %s (mode=%s)", len(subtasks), max_subtasks, mode.value)
                 subtasks = subtasks[:max_subtasks]
                 # Invalidate depends_on references to truncated subtasks
                 for st in subtasks:
@@ -522,7 +535,7 @@ class Planner:
             if len(subtasks) == 1:
                 logger.info("Planner returned 1 subtask — no decomposition needed")
             else:
-                logger.info(f"Decomposed into {len(subtasks)} subtasks: {[s.type for s in subtasks]}")
+                logger.info("Decomposed into %s subtasks: %s", len(subtasks), [s.type for s in subtasks])
 
                 # Step 4: Inject shared context into each subtask
                 subtasks = await self._inject_context(prompt, subtasks, messages=messages)
@@ -531,7 +544,7 @@ class Planner:
             return subtasks
 
         except (SmartSplitError, json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.warning(f"Planner decomposition failed, single-task fallback: {type(e).__name__}")
+            logger.warning("Planner decomposition failed, single-task fallback: %s", type(e).__name__)
             result = [Subtask(content=prompt, messages=messages)]
             self.cache.put(key, result)
             return result
@@ -555,7 +568,11 @@ class Planner:
                 prefer="groq",
             )
             context_summary = context_summary.strip()
-            if not context_summary or len(context_summary) > 500:
+            if not context_summary:
+                logger.warning("Context injection skipped: empty summary from LLM")
+                return subtasks
+            if len(context_summary) > 500:
+                logger.warning("Context injection skipped: summary too long (%s chars)", len(context_summary))
                 return subtasks
 
             enriched = []
@@ -569,10 +586,10 @@ class Planner:
                         messages=st.messages,
                     )
                 )
-            logger.info(f"Injected context summary ({len(context_summary)} chars) into {len(subtasks)} subtasks")
+            logger.info("Injected context summary (%s chars) into %s subtasks", len(context_summary), len(subtasks))
             return enriched
         except (SmartSplitError, ValueError) as e:
-            logger.warning(f"Context injection failed, using raw subtasks: {type(e).__name__}")
+            logger.error("Context injection FAILED — subtasks will lack context: %s", type(e).__name__)
             return subtasks
 
     async def synthesize(self, original_prompt: str, results: list[RouteResult]) -> str:
@@ -591,5 +608,5 @@ class Planner:
                 prefer="groq",
             )
         except (SmartSplitError, ValueError) as e:
-            logger.warning(f"Synthesis failed, concatenating results: {type(e).__name__}")
+            logger.warning("Synthesis failed, concatenating results: %s", type(e).__name__)
             return "\n\n".join(r.response for r in results)

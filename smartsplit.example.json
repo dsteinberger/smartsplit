@@ -1,5 +1,6 @@
 {
   "mode": "balanced",
+  "brain": "",
   "free_llm_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
   "providers": {
     "groq": {
@@ -68,5 +69,11 @@
       "enabled": false,
       "daily_budget_tokens": 100000
     }
+  },
+  "overrides": {
+    "_comment": "Force a specific provider for a task type. Remove the underscore keys to enable.",
+    "_code": "anthropic",
+    "_reasoning": "openai",
+    "_translation": "mistral"
   }
 }

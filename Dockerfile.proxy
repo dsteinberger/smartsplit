@@ -1,0 +1,24 @@
+FROM python:3.13-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY smartsplit/ smartsplit/
+RUN uv pip install --system --no-cache . cryptography
+
+RUN useradd -m -u 1000 smartsplit \
+ && mkdir -p /certs && chown smartsplit:smartsplit /certs
+USER smartsplit
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8420
+
+# Certs are generated at first run and stored in /certs (mount as volume)
+ENV SMARTSPLIT_CERT_DIR=/certs
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8420/health')" || exit 1
+
+ENTRYPOINT ["python", "-m", "smartsplit"]
+CMD ["--mode", "proxy", "--host", "0.0.0.0", "--port", "8420"]

@@ -114,7 +114,8 @@ _ERROR_PATTERNS = [
 ]
 
 # How many leading characters to scan for error patterns.
-_ERROR_SCAN_LENGTH = 200
+# Kept short so "I apologize for the confusion. Here's the code: ..." is not rejected.
+_ERROR_SCAN_LENGTH = 80
 
 # Quality gates are skipped in economy mode for speed.
 _QUALITY_GATE_MODES = {Mode.BALANCED, Mode.QUALITY}
@@ -222,13 +223,13 @@ class Router:
         else:
             quality = static_quality
 
-        # Cost: free = 1.0, paid:fast = 0.3 (cheap paid), paid:strong = 0.0 (expensive)
+        # Cost: free = 1.0, paid:fast = 0.5 (cheap paid), paid:strong = 0.2 (expensive but not zero)
         if provider_type == ProviderType.FREE:
             cost_score = 1.0
         elif tier == "fast":
-            cost_score = 0.3
+            cost_score = 0.5
         else:
-            cost_score = 0.0
+            cost_score = 0.2
 
         # Availability: 1.0 if above danger threshold, degrades below it
         raw_avail = self._quota.get_availability(provider_name)
@@ -242,8 +243,10 @@ class Router:
         return w_quality * quality + w_cost * cost_score + w_avail * avail_score
 
     @staticmethod
-    def passes_quality_gate(response: str, subtask: Subtask) -> bool:
+    def quality_gate_reason(response: str, subtask: Subtask) -> str | None:
         """Check if a response meets minimum quality standards.
+
+        Returns None if the response passes, or a short reason string if it fails.
 
         Checks (language-agnostic where possible):
         1. Empty / too short
@@ -252,20 +255,20 @@ class Router:
         4. Structure check — code presence when code is requested
         """
         if not response or not response.strip():
-            return False
+            return "empty"
 
         stripped = response.strip()
 
         # 1. Length check based on complexity
         min_len = _MIN_RESPONSE_LENGTH.get(subtask.complexity, 5)
         if len(stripped) < min_len:
-            return False
+            return f"too_short ({len(stripped)}<{min_len})"
 
         # 2. Refusal pattern check — scan beginning only
         response_start = stripped[:_ERROR_SCAN_LENGTH].lower()
         for pattern in _ERROR_PATTERNS:
             if pattern in response_start:
-                return False
+                return f"refusal_pattern ({pattern!r})"
 
         # 3. Substance checks (language-agnostic)
         if len(stripped) > 50:
@@ -273,18 +276,18 @@ class Router:
             if words:
                 # High repetition = low quality (e.g. "the the the the")
                 unique_ratio = len(set(words)) / len(words)
-                if unique_ratio < 0.15:
-                    return False
+                if unique_ratio < 0.3:
+                    return f"repetition ({unique_ratio:.0%} unique)"
 
                 # Very short average word length = gibberish
                 avg_word_len = sum(len(w) for w in words) / len(words)
                 if avg_word_len < 1.5:
-                    return False
+                    return f"gibberish (avg_word_len={avg_word_len:.1f})"
 
             # Response is mostly whitespace / newlines
             content_ratio = len(stripped.replace(" ", "").replace("\n", "")) / len(stripped)
             if content_ratio < 0.3:
-                return False
+                return f"mostly_whitespace ({content_ratio:.0%} content)"
 
         # 4. Structure check — code tasks with "write"/"implement" should contain code
         if subtask.type == TaskType.CODE and subtask.complexity != Complexity.LOW:
@@ -293,9 +296,14 @@ class Router:
             if asks_for_code:
                 has_code = "```" in response or "def " in response or "class " in response or "function " in response
                 if not has_code and len(stripped) > 200:
-                    return False
+                    return "missing_code"
 
-        return True
+        return None
+
+    @staticmethod
+    def passes_quality_gate(response: str, subtask: Subtask) -> bool:
+        """Check if a response meets minimum quality standards."""
+        return Router.quality_gate_reason(response, subtask) is None
 
     async def _check_refusal_llm(self, response: str) -> bool:
         """Use a free LLM to check if a response is a refusal (multilingual).
@@ -322,6 +330,17 @@ class Router:
         tokens_est = estimate_tokens(subtask.content)
         escalations: list[EscalationRecord] = []
 
+        # Check user override for this task type
+        override_name = self._config.overrides.get(subtask.type.value)
+        if override_name:
+            override_provider = self._registry.get(override_name)
+            if override_provider is None:
+                logger.warning("Override %s → %s ignored — provider not configured", subtask.type.value, override_name)
+                override_name = None
+            elif not self._registry.circuit_breaker.is_healthy(override_name):
+                logger.warning("Override %s → %s skipped — circuit breaker open", subtask.type.value, override_name)
+                override_name = None
+
         # Build scored candidate list
         candidates: list[tuple[str, float]] = []
         for name, provider in self._registry.get_all().items():
@@ -330,7 +349,7 @@ class Router:
             if not is_search and isinstance(provider, SearchProvider):
                 continue
             if not self._registry.circuit_breaker.is_healthy(name):
-                logger.info(f"Skipping {name} — circuit breaker open")
+                logger.info("Skipping %s — circuit breaker open", name)
                 continue
 
             pconfig = self._config.providers.get(name)
@@ -338,6 +357,12 @@ class Router:
             candidates.append((name, self.score(name, ptype, subtask, mode)))
 
         candidates.sort(key=lambda c: c[1], reverse=True)
+
+        # If override is active, move it to the front
+        if override_name:
+            candidates = [(n, s) for n, s in candidates if n != override_name]
+            candidates.insert(0, (override_name, 10.0))
+            logger.info("Override active: %s → %s", subtask.type.value, override_name)
 
         if not candidates:
             hint = _no_provider_hint(subtask.type)
@@ -373,7 +398,7 @@ class Router:
                 failed_reason = None
 
             try:
-                logger.info(f"Routing [{subtask.type}] -> {provider_name} (score={provider_score:.3f})")
+                logger.info("Routing [%s] -> %s (score=%.3f)", subtask.type, provider_name, provider_score)
 
                 usage = TokenUsage()
                 if is_search:
@@ -387,7 +412,7 @@ class Router:
                     )
                     model = _get_model_for_tier(prov_cfg, tier)
                     if model:
-                        logger.info(f"  Using {tier} model: {model}")
+                        logger.info("  Using %s model: %s", tier, model)
                     # If subtask has conversation messages, update the last user message
                     # with the enriched content (context injection, enrichment, etc.)
                     messages = subtask.messages
@@ -401,7 +426,7 @@ class Router:
                         provider_name, subtask.content, model=model, messages=messages
                     )
 
-                logger.debug(f"  {provider_name} response: {response[:150]!r}")
+                logger.debug("  %s response: %r", provider_name, response[:150])
 
                 prov_cfg = self._config.providers.get(provider_name)
                 is_paid = prov_cfg.type == ProviderType.PAID if prov_cfg else False
@@ -413,8 +438,9 @@ class Router:
                 )
 
                 # Quality gate: if response is low-quality, try next provider
-                if use_quality_gate and not self.passes_quality_gate(response, subtask):
-                    logger.warning(f"  {provider_name} failed quality gate, escalating")
+                gate_reject = self.quality_gate_reason(response, subtask) if use_quality_gate else None
+                if gate_reject:
+                    logger.warning("  %s failed quality gate: %s, escalating", provider_name, gate_reject)
                     if self._bandit:
                         self._bandit.record(subtask.type.value, bandit_key, success=False)
                     # Keep the first (highest-scored) response as fallback
@@ -432,7 +458,7 @@ class Router:
                 if use_quality_gate and _MIN_LLM_CHECK_LEN <= resp_len <= _MAX_LLM_CHECK_LEN:
                     is_refusal = await self._check_refusal_llm(response)
                     if is_refusal:
-                        logger.warning(f"  {provider_name} LLM detected refusal, escalating")
+                        logger.warning("  %s LLM detected refusal, escalating", provider_name)
                         if self._bandit:
                             self._bandit.record(subtask.type.value, bandit_key, success=False)
                         if last_response is None:
@@ -466,15 +492,15 @@ class Router:
                 )
                 if is_context_error:
                     # Context too long — not the provider's fault, don't penalize
-                    logger.info(f"  {provider_name} context too long, trying next provider")
+                    logger.info("  %s context too long, trying next provider", provider_name)
                     failed_provider = provider_name
                     failed_reason = "context_too_long"
                     continue
-                logger.warning(f"  {provider_name} failed: {type(e).__name__}")
+                logger.warning("  %s failed: %s", provider_name, type(e).__name__)
                 # If strong model failed, retry with fast model on same provider
                 if not is_search and model and prov_cfg and prov_cfg.fast_model and model != prov_cfg.fast_model:
                     try:
-                        logger.info(f"  Retrying {provider_name} with fast model: {prov_cfg.fast_model}")
+                        logger.info("  Retrying %s with fast model: %s", provider_name, prov_cfg.fast_model)
                         response, fast_usage = await self._registry.call_llm(
                             provider_name,
                             subtask.content,
@@ -482,6 +508,8 @@ class Router:
                             messages=messages,
                         )
                         self._registry.circuit_breaker.record_success(provider_name)
+                        if self._bandit:
+                            self._bandit.record(subtask.type.value, f"{provider_name}:fast", success=True)
                         self._quota.record_usage(
                             provider_name,
                             subtask.type.value,
@@ -501,7 +529,7 @@ class Router:
                             completion_tokens=fast_usage.completion_tokens,
                         )
                     except (ProviderError, httpx.HTTPError, TimeoutError) as e2:
-                        logger.warning(f"  {provider_name} fast model also failed: {type(e2).__name__}")
+                        logger.warning("  %s fast model also failed: %s", provider_name, type(e2).__name__)
                 self._registry.circuit_breaker.record_failure(provider_name)
                 if self._bandit:
                     self._bandit.record(subtask.type.value, bandit_key, success=False)

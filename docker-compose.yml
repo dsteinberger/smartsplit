@@ -1,4 +1,5 @@
 services:
+  # API mode — OpenAI-compatible endpoint (default)
   smartsplit:
     build: .
     image: smartsplit:latest
@@ -11,3 +12,24 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # Proxy mode — HTTPS proxy for Claude Code / any agent
+  # Usage: docker compose up proxy
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    image: smartsplit-proxy:latest
+    ports:
+      - "8420:8420"
+    env_file: .env
+    volumes:
+      - ~/.smartsplit/certs:/certs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - proxy

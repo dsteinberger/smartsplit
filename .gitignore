@@ -14,6 +14,7 @@ coverage.xml
 # Environment / secrets
 .env
 .env.*
+!.env.example
 smartsplit.json
 
 # IDE
@@ -37,3 +38,4 @@ benchmarks/results/
 opencode.json
 .aider*
 .continuerc.json
+review-*.md
