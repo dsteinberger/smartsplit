@@ -666,6 +666,7 @@ async def run_proxy(port: int = 8420, host: str = "127.0.0.1") -> None:
         detector=detector,
         anticipator=anticipator,
         pattern_learner=pattern_learner,
+        mode=cfg.mode,
     )
 
     llm_hosts = ", ".join(sorted(_LLM_HOSTS))

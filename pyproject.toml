@@ -34,9 +34,6 @@ Issues = "https://github.com/dsteinberger/smartsplit/issues"
 Changelog = "https://github.com/dsteinberger/smartsplit/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-proxy = [
-    "mitmproxy>=12.0; python_version>='3.12'",
-]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

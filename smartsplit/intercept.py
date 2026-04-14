@@ -1,7 +1,7 @@
-"""Interception logic — shared between the lightweight proxy and the mitmproxy addon.
+"""Interception logic for the HTTPS proxy.
 
 Pure functions that operate on Anthropic request/response dicts.
-No dependency on mitmproxy or asyncio — just JSON in, JSON out.
+JSON in, JSON out.
 """
 
 from __future__ import annotations

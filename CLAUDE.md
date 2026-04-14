@@ -47,7 +47,6 @@ smartsplit/
   config.py               # Pydantic config, brain auto-detection, env var loading, defaults
   models.py               # Pydantic models + StrEnum (TaskType, Mode, Subtask, RouteResult…)
   exceptions.py           # SmartSplitError hierarchy
-  mitm_addon.py           # mitmproxy addon (legacy) — standalone alternative to proxy.py
   providers/
     base.py              # ABC: LLMProvider, SearchProvider (Strategy pattern)
     registry.py          # Factory + lookup + call_brain + call_free_llm + circuit breaker

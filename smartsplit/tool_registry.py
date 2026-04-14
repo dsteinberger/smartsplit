@@ -110,7 +110,7 @@ RECOGNIZE_ONLY_TOOLS: frozenset[str] = frozenset(
 SAFE_TOOLS: frozenset[str] = EXECUTABLE_TOOLS | RECOGNIZE_ONLY_TOOLS
 
 # ── Compression categories (Tool-Aware Proxy) ────────────────
-# Used by mitm_addon to decide how to handle tool results.
+# Used by the proxy to decide how to handle tool results.
 
 # Small/structured results, pass through untouched.
 # Grep is here because the LLM needs full search results to make decisions
@@ -202,7 +202,7 @@ LIST_DIR_TOOLS: frozenset[str] = frozenset({"list_directory", "list_files", "lis
 SEARCH_TOOLS: frozenset[str] = frozenset({"web_search", "WebSearch"})
 GREP_TOOLS: frozenset[str] = frozenset({"grep", "Grep", "grep_search", "search_files", "find", "file_search"})
 
-# ── Tools the mitm addon can fake ─────────────────────────────
+# ── Tools the proxy can fake ──────────────────────────────────
 # These must match tools the agent actually provides.
 
 SAFE_READ_TOOLS_FOR_FAKING: frozenset[str] = frozenset(
