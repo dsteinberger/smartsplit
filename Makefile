@@ -36,7 +36,7 @@ run: ## Start SmartSplit server (API mode)
 	uv run python -m smartsplit
 
 proxy: ## Start SmartSplit in HTTPS proxy mode (for Claude Code)
-	uv run --extra proxy smartsplit --mode proxy
+	uv run smartsplit --proxy
 
 setup-claude: ## One-time Claude Code setup (generates certs)
 	uv run --extra proxy smartsplit setup-claude

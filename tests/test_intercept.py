@@ -1,4 +1,4 @@
-"""Tests for smartsplit.intercept — pure functions, no mitmproxy dependency."""
+"""Tests for smartsplit.intercept — pure functions."""
 
 from __future__ import annotations
 

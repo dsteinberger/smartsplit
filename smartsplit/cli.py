@@ -7,43 +7,16 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 
 
-def _run_proxy_mode(port: int, host: str, log_level: str) -> None:
+def _run_proxy_mode(port: int, host: str, log_level: str, mode: str = "balanced") -> None:
     """Start SmartSplit as a lightweight HTTPS intercepting proxy."""
+    import os
+
+    os.environ["SMARTSPLIT_MODE"] = mode
     from smartsplit.proxy import start_proxy
 
     start_proxy(port=port, host=host, log_level=log_level)
-
-
-def _run_proxy_mitmproxy(port: int, log_level: str) -> None:
-    """Start SmartSplit using mitmproxy (legacy, heavier)."""
-    try:
-        from mitmproxy.tools.main import mitmdump
-    except ImportError:
-        print("Error: mitmproxy is required for proxy-mitm mode.")
-        print("Install with: pip install 'smartsplit[proxy]'")
-        raise SystemExit(1) from None
-
-    addon_path = os.path.join(os.path.dirname(__file__), "mitm_addon.py")
-
-    print("\n  SmartSplit — HTTPS Proxy Mode (mitmproxy)")
-    print(f"  Intercepting proxy on port {port}")
-    print()
-
-    mitmdump(
-        [
-            "-s",
-            addon_path,
-            "-p",
-            str(port),
-            "--set",
-            "connection_strategy=lazy",
-            "--set",
-            "ssl_insecure=true",
-        ]
-    )
 
 
 def _setup_claude() -> None:
@@ -59,7 +32,7 @@ def _setup_claude() -> None:
     print("  Ready! Launch SmartSplit + Claude Code:")
     print()
     print("    # Terminal 1: Start SmartSplit proxy")
-    print("    smartsplit --mode proxy")
+    print("    smartsplit --proxy")
     print()
     print("    # Terminal 2: Launch Claude Code")
     print(f"    NODE_EXTRA_CA_CERTS={ca_cert_path} \\")
@@ -76,8 +49,8 @@ def main() -> None:
         epilog="""\
 Examples:
   smartsplit                          # API mode (default) on port 8420
-  smartsplit --mode proxy             # HTTPS proxy for Claude Code (lightweight)
-  smartsplit --mode proxy-mitm        # HTTPS proxy using mitmproxy (legacy)
+  smartsplit --proxy                  # HTTPS proxy for Claude Code
+  smartsplit --proxy --mode quality   # HTTPS proxy with quality routing
   smartsplit setup-claude             # Setup helper for Claude Code
   smartsplit --port 3456 --mode economy
 
@@ -94,11 +67,16 @@ Proxy mode (Claude Code + subscription):
     parser.add_argument("--port", type=int, default=8420, help="Port (default: 8420)")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
     parser.add_argument(
+        "--proxy",
+        action="store_true",
+        help="Run as HTTPS intercepting proxy (for Claude Code, Cline, etc.)",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         default="balanced",
-        choices=["economy", "balanced", "quality", "proxy", "proxy-mitm"],
-        help="Mode: economy, balanced, quality (API), proxy (lightweight HTTPS), or proxy-mitm (mitmproxy)",
+        choices=["economy", "balanced", "quality"],
+        help="Worker routing mode: economy (favor cost), balanced (default), quality (favor quality)",
     )
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
@@ -115,12 +93,9 @@ Proxy mode (Claude Code + subscription):
         _setup_claude()
         return
 
-    # Proxy modes
-    if args.mode == "proxy":
-        _run_proxy_mode(args.port, args.host, args.log_level)
-        return
-    if args.mode == "proxy-mitm":
-        _run_proxy_mitmproxy(args.port, args.log_level)
+    # Proxy mode
+    if args.proxy:
+        _run_proxy_mode(args.port, args.host, args.log_level, args.mode)
         return
 
     # API mode (default)
