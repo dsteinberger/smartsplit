@@ -18,9 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Install dependencies
         run: pip install httpx
@@ -36,6 +36,10 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           REPORT_OUTPUT: report.md
         run: python scripts/provider_watch.py
+
+      - name: Check upstream safe tools
+        run: |
+          python scripts/check_safe_tools.py --markdown >> report.md || true
 
       - name: Check if report has action items
         id: check

@@ -75,6 +75,47 @@ class TestKeywordFallbackDetection:
             scores = [s for _, s in domains]
             assert scores == sorted(scores, reverse=True)
 
+    @pytest.mark.parametrize(
+        "prompt, expected_domain, lang",
+        [
+            # Français
+            ("Analyser les avantages et inconvénients de cette stratégie", "reasoning", "fr"),
+            ("Écris une fonction Python avec une classe pour gérer les erreurs", "code", "fr"),
+            ("Résume ce document en points clés", "summarize", "fr"),
+            ("Chercher les dernières nouvelles sur l'intelligence artificielle", "web_search", "fr"),
+            # Español
+            ("Analizar las ventajas y desventajas de esta arquitectura", "reasoning", "es"),
+            ("Escribe una función Python para conectar a la base de datos", "code", "es"),
+            ("Resumir este documento en puntos principales", "summarize", "es"),
+            ("Buscar las últimas noticias sobre React", "web_search", "es"),
+            # Português
+            ("Analisar as vantagens e desvantagens desta abordagem", "reasoning", "pt"),
+            ("Escreva uma função Python para processar dados", "code", "pt"),
+            ("Resumir este texto nos pontos principais", "summarize", "pt"),
+            # Deutsch
+            ("Analysieren Sie die Vor- und Nachteile dieser Strategie", "reasoning", "de"),
+            ("Schreiben Sie eine Python-Funktion für die Datenbank", "code", "de"),
+            ("Fassen Sie dieses Dokument zusammen", "summarize", "de"),
+            # 中文
+            ("分析这个策略的优缺点", "reasoning", "zh"),
+            ("写一个Python函数来处理数据库", "code", "zh"),
+            ("搜索最新的React框架更新", "web_search", "zh"),
+            # 日本語
+            ("この戦略のメリットとデメリットを分析してください", "reasoning", "ja"),
+            ("データベースに接続するPython関数を実装してください", "code", "ja"),
+            # 한국어
+            ("이 전략의 장단점을 분석해주세요", "reasoning", "ko"),
+            ("데이터베이스에 연결하는 Python 함수를 구현해주세요", "code", "ko"),
+            # Русский
+            ("Проанализировать преимущества и недостатки этой стратегии", "reasoning", "ru"),
+            ("Напишите функцию Python для обработки базы данных", "code", "ru"),
+        ],
+    )
+    def test_multilingual_domain_detection(self, prompt, expected_domain, lang):
+        domains = detect_domains(prompt)
+        domain_names = [d for d, _ in domains]
+        assert expected_domain in domain_names, f"[{lang}] expected '{expected_domain}' in {domain_names}"
+
 
 # ── LLM Domain Classification ──────────────────────────────
 

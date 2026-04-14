@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from smartsplit.proxy import main
+from smartsplit.cli import main
 
 main()

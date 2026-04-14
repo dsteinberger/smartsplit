@@ -56,11 +56,20 @@ def _make_provider_config(
 def make_config():
     """Factory fixture — call with a list of provider names."""
 
-    def _factory(providers: list[str], mode: Mode = Mode.BALANCED) -> SmartSplitConfig:
+    def _factory(
+        providers: list[str],
+        mode: Mode = Mode.BALANCED,
+        overrides: dict[str, str] | None = None,
+    ) -> SmartSplitConfig:
+        from smartsplit.config import _resolve_brain
+
+        provider_configs = {p: _make_provider_config(p) for p in providers}
         return SmartSplitConfig(
             mode=mode,
-            providers={p: _make_provider_config(p) for p in providers},
+            brain=_resolve_brain(provider_configs),
+            providers=provider_configs,
             competence_table=SAMPLE_COMPETENCE,
+            overrides=overrides or {},
         )
 
     return _factory

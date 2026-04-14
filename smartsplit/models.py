@@ -52,6 +52,14 @@ class ProviderType(StrEnum):
     PAID = "paid"
 
 
+class ContextTier(StrEnum):
+    """Worker context tier — controls how much prompt context is sent to a provider."""
+
+    SMALL = "small"  # ~1k tokens / 4k chars — tight free tiers (Cerebras, Groq)
+    MEDIUM = "medium"  # ~4k tokens / 16k chars — generous free tiers (Mistral, OpenRouter)
+    LARGE = "large"  # ~16k tokens / 64k chars — paid or high-limit (Gemini, paid APIs)
+
+
 class Subtask(BaseModel):
     type: TaskType = TaskType.GENERAL
     content: str

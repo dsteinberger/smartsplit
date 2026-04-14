@@ -15,12 +15,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from smartsplit.models import Mode, ProviderType
+from smartsplit.models import ContextTier, Mode, ProviderType
 
 # ── Pydantic config models ──────────────────────────────────
 
 
 class ProviderConfig(BaseModel):
+    """Configuration for a single LLM or search provider."""
+
     api_key: str = ""
     type: ProviderType = ProviderType.FREE
     enabled: bool = False
@@ -32,16 +34,27 @@ class ProviderConfig(BaseModel):
     temperature: float = 0.3
     max_tokens: int = 4096
     max_search_results: int = 5
+    context_tier: ContextTier = ContextTier.SMALL
 
 
 DEFAULT_FREE_LLM_PRIORITY = ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"]
 
+# Brain priority: paid first (best quality), then free by capability.
+_BRAIN_PRIORITY = ["anthropic", "openai", "deepseek", "groq", "gemini", "openrouter", "mistral", "cerebras"]
+
 
 class SmartSplitConfig(BaseModel):
+    """Top-level SmartSplit configuration."""
+
     mode: Mode = Mode.BALANCED
+    brain: str = Field(default="", description="Main LLM provider. Auto-detected if empty.")
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     competence_table: dict[str, dict[str, int]] = Field(default_factory=dict)
     free_llm_priority: list[str] = Field(default_factory=lambda: list(DEFAULT_FREE_LLM_PRIORITY))
+    overrides: dict[str, str] = Field(
+        default_factory=dict,
+        description="Force a specific provider for a task type. Example: {'code': 'anthropic'}",
+    )
 
 
 # ── Defaults ─────────────────────────────────────────────────
@@ -52,18 +65,21 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
         "enabled": True,
         "limits": {"rpm": 1000, "rpd": 14400},
         "model": "llama-3.3-70b-versatile",
+        "context_tier": "small",
     },
     "cerebras": {
         "type": "free",
         "enabled": False,
         "limits": {"rpm": 30, "rpd": 14400},
         "model": "qwen-3-235b-a22b-instruct-2507",
+        "context_tier": "small",
     },
     "gemini": {
         "type": "free",
         "enabled": True,
         "limits": {"rpm": 15, "rpd": 1500},
         "model": "gemini-2.5-flash",
+        "context_tier": "large",
     },
     "deepseek": {
         "type": "paid",
@@ -78,24 +94,28 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
         "enabled": False,
         "limits": {"rpm": 20, "rpd": 50},
         "model": "qwen/qwen3-coder:free",
+        "context_tier": "medium",
     },
     "mistral": {
         "type": "free",
         "enabled": False,
         "limits": {"rpm": 60, "rpd": 1000000},
         "model": "mistral-small-latest",
+        "context_tier": "medium",
     },
     "huggingface": {
         "type": "free",
         "enabled": False,
         "limits": {"rpm": 600},
         "model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+        "context_tier": "small",
     },
     "cloudflare": {
         "type": "free",
         "enabled": False,
         "limits": {"rpd": 10000},
         "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "context_tier": "small",
     },
     "serper": {
         "type": "free",
@@ -114,14 +134,16 @@ DEFAULT_PROVIDERS: dict[str, dict] = {
         "model": "claude-sonnet-4-6-20250514",
         "fast_model": "claude-haiku-4-5-20251001",
         "strong_model": "claude-sonnet-4-6-20250514",
+        "context_tier": "large",
     },
     "openai": {
         "type": "paid",
         "enabled": False,
         "daily_budget_tokens": 100_000,
-        "model": "gpt-4o-mini",
+        "model": "gpt-4o",
         "fast_model": "gpt-4o-mini",
         "strong_model": "o3",
+        "context_tier": "large",
     },
 }
 
@@ -351,6 +373,10 @@ def load_config() -> SmartSplitConfig:
     if mode_env:
         raw["mode"] = mode_env
 
+    brain_env = os.environ.get("SMARTSPLIT_BRAIN")
+    if brain_env:
+        raw["brain"] = brain_env
+
     for env_var, provider_name in _ENV_KEY_MAP.items():
         api_key = os.environ.get(env_var)
         if api_key:
@@ -358,7 +384,31 @@ def load_config() -> SmartSplitConfig:
             raw["providers"][provider_name]["api_key"] = api_key
             raw["providers"][provider_name]["enabled"] = True
 
-    return SmartSplitConfig.model_validate(raw)
+    cfg = SmartSplitConfig.model_validate(raw)
+
+    # Auto-detect brain if not explicitly set
+    if not cfg.brain:
+        cfg = cfg.model_copy(update={"brain": _resolve_brain(cfg.providers)})
+
+    return cfg
+
+
+def _resolve_brain(providers: dict[str, ProviderConfig]) -> str:
+    """Pick the best available provider as the brain (main LLM).
+
+    Priority: paid providers first (best quality), then free by capability.
+    Search providers (serper, tavily) are never selected as brain.
+    """
+    _SEARCH_PROVIDERS = {"serper", "tavily"}
+    for name in _BRAIN_PRIORITY:
+        pconfig = providers.get(name)
+        if pconfig and pconfig.enabled and pconfig.api_key and name not in _SEARCH_PROVIDERS:
+            return name
+    # Fallback: first enabled LLM provider in any order
+    for name, pconfig in providers.items():
+        if pconfig.enabled and pconfig.api_key and name not in _SEARCH_PROVIDERS:
+            return name
+    return ""
 
 
 # ── Helpers ──────────────────────────────────────────────────
