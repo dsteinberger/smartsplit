@@ -20,8 +20,8 @@ from smartsplit.models import (
     TokenUsage,
 )
 from smartsplit.providers.registry import ProviderRegistry
-from smartsplit.quota import QuotaTracker
-from smartsplit.router import Router
+from smartsplit.routing.quota import QuotaTracker
+from smartsplit.routing.router import Router
 
 # ── Scoring (additive weighted) ──────────────────────────────
 
@@ -413,7 +413,7 @@ class TestStructuredTraces:
 class TestTierLogic:
     def test_free_provider_always_fast(self):
         from smartsplit.config import ProviderConfig
-        from smartsplit.router import _resolve_tier
+        from smartsplit.routing.router import _resolve_tier
 
         free = ProviderConfig(type=ProviderType.FREE)
         assert _resolve_tier(free, Complexity.LOW) == "fast"
@@ -422,7 +422,7 @@ class TestTierLogic:
 
     def test_paid_high_complexity_uses_strong(self):
         from smartsplit.config import ProviderConfig
-        from smartsplit.router import _resolve_tier
+        from smartsplit.routing.router import _resolve_tier
 
         paid = ProviderConfig(type=ProviderType.PAID, fast_model="haiku", strong_model="sonnet")
         assert _resolve_tier(paid, Complexity.HIGH) == "strong"
@@ -430,7 +430,7 @@ class TestTierLogic:
 
     def test_paid_medium_uses_strong_in_quality_mode(self):
         from smartsplit.config import ProviderConfig
-        from smartsplit.router import _resolve_tier
+        from smartsplit.routing.router import _resolve_tier
 
         paid = ProviderConfig(type=ProviderType.PAID, fast_model="haiku", strong_model="sonnet")
         assert _resolve_tier(paid, Complexity.MEDIUM, Mode.QUALITY) == "strong"
@@ -439,7 +439,7 @@ class TestTierLogic:
 
     def test_paid_low_always_fast(self):
         from smartsplit.config import ProviderConfig
-        from smartsplit.router import _resolve_tier
+        from smartsplit.routing.router import _resolve_tier
 
         paid = ProviderConfig(type=ProviderType.PAID, fast_model="haiku", strong_model="sonnet")
         assert _resolve_tier(paid, Complexity.LOW, Mode.QUALITY) == "fast"
@@ -447,14 +447,14 @@ class TestTierLogic:
 
     def test_no_strong_model_always_fast(self):
         from smartsplit.config import ProviderConfig
-        from smartsplit.router import _resolve_tier
+        from smartsplit.routing.router import _resolve_tier
 
         paid = ProviderConfig(type=ProviderType.PAID, fast_model="haiku", strong_model="")
         assert _resolve_tier(paid, Complexity.HIGH) == "fast"
 
     def test_get_model_for_tier(self):
         from smartsplit.config import ProviderConfig
-        from smartsplit.router import _get_model_for_tier
+        from smartsplit.routing.router import _get_model_for_tier
 
         paid = ProviderConfig(type=ProviderType.PAID, fast_model="haiku", strong_model="sonnet")
         assert _get_model_for_tier(paid, "fast") == "haiku"
@@ -462,7 +462,7 @@ class TestTierLogic:
 
     def test_get_model_free_returns_none(self):
         from smartsplit.config import ProviderConfig
-        from smartsplit.router import _get_model_for_tier
+        from smartsplit.routing.router import _get_model_for_tier
 
         free = ProviderConfig(type=ProviderType.FREE)
         assert _get_model_for_tier(free, "fast") is None

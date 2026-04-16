@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -30,182 +29,6 @@ _CONTEXT_TIER_MAX_CHARS: dict[ContextTier, int] = {
 logger = logging.getLogger("smartsplit.registry")
 
 _KEY_PATTERN = re.compile(r"(sk-ant-|gsk_|AIza|tvly_|srp_|sk-|csk-|dsk-|mis-)\S+|\b[A-Za-z0-9_-]{32,}\b")
-
-_ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
-
-
-def _convert_to_anthropic(body: dict, model: str) -> dict:
-    """Convert an OpenAI-format request body to Anthropic Messages API format.
-
-    Handles: messages (system extracted), tools, max_tokens, model override.
-    """
-    messages = body.get("messages", [])
-    api_messages: list[dict] = []
-    system_parts: list[str] = []
-
-    for msg in messages:
-        role = msg.get("role", "user")
-        if role == "system":
-            # Anthropic expects system as a top-level field, not in messages
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                system_parts.append(content)
-            elif isinstance(content, list):
-                # Handle structured content blocks
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        system_parts.append(block.get("text", ""))
-                    elif isinstance(block, str):
-                        system_parts.append(block)
-        else:
-            api_msg: dict = {"role": role}
-            content = msg.get("content")
-
-            # Handle tool_calls in assistant messages → Anthropic tool_use blocks
-            if role == "assistant" and msg.get("tool_calls"):
-                blocks: list[dict] = []
-                if content:
-                    blocks.append({"type": "text", "text": content})
-                for tc in msg["tool_calls"]:
-                    fn = tc.get("function", {})
-                    blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": tc.get("id", ""),
-                            "name": fn.get("name", ""),
-                            "input": json.loads(fn["arguments"])
-                            if isinstance(fn.get("arguments"), str)
-                            else fn.get("arguments", {}),
-                        }
-                    )
-                api_msg["content"] = blocks
-            elif role == "tool":
-                # OpenAI tool result → Anthropic tool_result
-                api_msg["role"] = "user"
-                api_msg["content"] = [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": msg.get("tool_call_id", ""),
-                        "content": content or "",
-                    }
-                ]
-            else:
-                api_msg["content"] = content
-            api_messages.append(api_msg)
-
-    anthropic_body: dict = {
-        "model": model,
-        "messages": api_messages,
-        "max_tokens": body.get("max_tokens") or _ANTHROPIC_DEFAULT_MAX_TOKENS,
-    }
-
-    if system_parts:
-        anthropic_body["system"] = "\n".join(system_parts)
-
-    # Convert OpenAI tools → Anthropic tools
-    if body.get("tools"):
-        anthropic_tools: list[dict] = []
-        for tool in body["tools"]:
-            if tool.get("type") == "function":
-                fn = tool.get("function", {})
-                anthropic_tools.append(
-                    {
-                        "name": fn.get("name", ""),
-                        "description": fn.get("description", ""),
-                        "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
-                    }
-                )
-        if anthropic_tools:
-            anthropic_body["tools"] = anthropic_tools
-
-    # Convert tool_choice
-    tool_choice = body.get("tool_choice")
-    if tool_choice == "auto":
-        anthropic_body["tool_choice"] = {"type": "auto"}
-    elif tool_choice == "required":
-        anthropic_body["tool_choice"] = {"type": "any"}
-    elif tool_choice == "none":
-        # Anthropic doesn't have "none" — just omit tools
-        anthropic_body.pop("tools", None)
-    elif isinstance(tool_choice, dict) and tool_choice.get("function", {}).get("name"):
-        anthropic_body["tool_choice"] = {
-            "type": "tool",
-            "name": tool_choice["function"]["name"],
-        }
-
-    # Pass through temperature if set
-    if "temperature" in body:
-        anthropic_body["temperature"] = body["temperature"]
-
-    return anthropic_body
-
-
-def _convert_from_anthropic(data: dict, model: str) -> dict:
-    """Convert an Anthropic Messages API response to OpenAI chat completion format.
-
-    Handles: text content, tool_use blocks, usage mapping.
-    """
-    content_blocks = data.get("content", [])
-    text_parts: list[str] = []
-    tool_calls: list[dict] = []
-    tc_index = 0
-
-    for block in content_blocks:
-        block_type = block.get("type", "")
-        if block_type == "text":
-            text_parts.append(block.get("text", ""))
-        elif block_type == "tool_use":
-            tool_calls.append(
-                {
-                    "id": block.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": block.get("name", ""),
-                        "arguments": json.dumps(block.get("input", {})),
-                    },
-                    "index": tc_index,
-                }
-            )
-            tc_index += 1
-
-    # Map Anthropic stop_reason → OpenAI finish_reason
-    stop_reason = data.get("stop_reason", "end_turn")
-    if stop_reason == "tool_use":
-        finish_reason = "tool_calls"
-    elif stop_reason == "max_tokens":
-        finish_reason = "length"
-    else:
-        finish_reason = "stop"
-
-    message: dict = {
-        "role": "assistant",
-        "content": "\n".join(text_parts) if text_parts else None,
-    }
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-
-    # Build OpenAI-format usage
-    anthropic_usage = data.get("usage", {})
-    prompt_tokens = anthropic_usage.get("input_tokens", 0)
-    completion_tokens = anthropic_usage.get("output_tokens", 0)
-
-    return {
-        "id": "chatcmpl-" + data.get("id", "unknown"),
-        "object": "chat.completion",
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": finish_reason,
-            }
-        ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        },
-    }
 
 
 # ── Circuit breaker ────────────────────────────────────────────
@@ -489,46 +312,15 @@ class ProviderRegistry:
                 continue
             if not self.circuit_breaker.is_healthy(name):
                 continue
-
-            # Get the provider's API URL and auth
-            is_anthropic = name == "anthropic"
-            if is_anthropic:
-                url = "https://api.anthropic.com/v1/messages"
-                headers = {
-                    "x-api-key": provider.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                }
-            elif name == "gemini":
-                # Gemini has an OpenAI-compatible endpoint for tool use
-                url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-                headers = {"Authorization": f"Bearer {provider.api_key}"}
-            elif hasattr(provider, "api_url"):
-                url = provider.api_url
-                headers = {"Authorization": f"Bearer {provider.api_key}"}
-            else:
-                continue
-
-            # Override model and force non-streaming (we return JSON, not SSE)
-            proxy_body = dict(body)
-            proxy_body["model"] = provider.config.model
-            proxy_body.pop("stream", None)
-
-            # Convert to Anthropic format if needed
-            if is_anthropic:
-                proxy_body = _convert_to_anthropic(proxy_body, provider.config.model)
-
             try:
                 async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
-                    response = await self._http.post(url, headers=headers, json=proxy_body)
-                    response.raise_for_status()
-                data = response.json()
-                # Convert Anthropic response back to OpenAI format
-                if is_anthropic:
-                    data = _convert_from_anthropic(data, provider.config.model)
+                    data = await provider.proxy_openai_request(body)
                 self.circuit_breaker.record_success(name)
                 logger.info("Proxied to brain %r successfully", name)
                 return data
+            except NotImplementedError:
+                logger.debug("Provider %r does not support agent-mode passthrough, skipping", name)
+                continue
             except TimeoutError as e:
                 logger.warning("Brain proxy %r timed out", name)
                 self.circuit_breaker.record_failure(name, e)

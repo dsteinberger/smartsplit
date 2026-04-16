@@ -9,10 +9,10 @@ import httpx
 import pytest
 
 from smartsplit.models import Complexity, Mode, RouteResult, Subtask, TaskType, TokenUsage
-from smartsplit.planner import Planner
 from smartsplit.providers.registry import ProviderRegistry
-from smartsplit.quota import QuotaTracker
-from smartsplit.router import Router
+from smartsplit.routing.quota import QuotaTracker
+from smartsplit.routing.router import Router
+from smartsplit.triage.planner import Planner
 
 
 class TestFullPipeline:

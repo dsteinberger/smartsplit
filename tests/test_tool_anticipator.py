@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from smartsplit.exceptions import SmartSplitError
-from smartsplit.tool_anticipator import (
+from smartsplit.tools.anticipator import (
     _DIR_ENTRY_LIMIT,
     _GREP_OUTPUT_LIMIT,
     _READ_FILE_LIMIT,
@@ -713,7 +713,7 @@ class TestExecuteOneErrors:
         """A tool that exceeds _TOOL_TIMEOUT returns success=False."""
         import time
 
-        import smartsplit.tool_anticipator as mod
+        import smartsplit.tools.anticipator as mod
 
         monkeypatch.setattr(mod, "_TOOL_TIMEOUT", 0.1)
 
@@ -867,7 +867,7 @@ class TestTimeout:
     @pytest.mark.asyncio
     async def test_slow_tool_returns_timeout(self, tmp_path: Path, monkeypatch):
         """A tool that exceeds _TOOL_TIMEOUT returns success=False with content='timeout'."""
-        import smartsplit.tool_anticipator as mod
+        import smartsplit.tools.anticipator as mod
 
         # Patch timeout to 0.1s so the test runs fast
         monkeypatch.setattr(mod, "_TOOL_TIMEOUT", 0.1)

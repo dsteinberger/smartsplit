@@ -12,7 +12,7 @@ class TestMain:
         mock_app = MagicMock()
         with (
             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
-            patch("smartsplit.pipeline.create_app", return_value=mock_app),
+            patch("smartsplit.proxy.pipeline.create_app", return_value=mock_app),
         ):
             from smartsplit.cli import main
 
@@ -29,7 +29,7 @@ class TestMain:
         mock_app = MagicMock()
         with (
             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
-            patch("smartsplit.pipeline.create_app", return_value=mock_app),
+            patch("smartsplit.proxy.pipeline.create_app", return_value=mock_app),
         ):
             from smartsplit.cli import main
 
@@ -66,7 +66,7 @@ class TestMain:
         mock_app = MagicMock()
         with (
             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
-            patch("smartsplit.pipeline.create_app", return_value=mock_app) as mock_create,
+            patch("smartsplit.proxy.pipeline.create_app", return_value=mock_app) as mock_create,
         ):
             from smartsplit.cli import main
 
@@ -76,14 +76,14 @@ class TestMain:
 
 class TestRunProxyMode:
     def test_calls_start_proxy(self):
-        with patch("smartsplit.proxy.start_proxy") as mock_sp:
+        with patch("smartsplit.proxy.server.start_proxy") as mock_sp:
             from smartsplit.cli import _run_proxy_mode
 
             _run_proxy_mode(8420, "127.0.0.1", "INFO")
             mock_sp.assert_called_once_with(port=8420, host="127.0.0.1", log_level="INFO")
 
     def test_passes_mode_via_env(self, monkeypatch):
-        with patch("smartsplit.proxy.start_proxy"):
+        with patch("smartsplit.proxy.server.start_proxy"):
             from smartsplit.cli import _run_proxy_mode
 
             _run_proxy_mode(8420, "127.0.0.1", "INFO", "quality")
@@ -96,7 +96,7 @@ class TestRunProxyMode:
 
 class TestSetupClaude:
     def test_prints_setup(self, capsys):
-        with patch("smartsplit.proxy.ensure_certs", return_value="/tmp/ca-cert.pem"):
+        with patch("smartsplit.proxy.server.ensure_certs", return_value="/tmp/ca-cert.pem"):
             from smartsplit.cli import _setup_claude
 
             _setup_claude()

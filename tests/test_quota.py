@@ -7,7 +7,7 @@ import time
 import pytest
 
 from smartsplit.models import SavingsReport
-from smartsplit.quota import QuotaTracker, estimate_tokens
+from smartsplit.routing.quota import QuotaTracker, estimate_tokens
 
 # ── Token Estimation ────────────────────────────────────────
 

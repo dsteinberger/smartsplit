@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from smartsplit.detector import TriageDecision, detect_with_llm
+from smartsplit.triage.detector import TriageDecision, detect_with_llm
 
 
 @pytest.fixture

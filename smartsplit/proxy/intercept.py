@@ -12,13 +12,13 @@ import re
 import uuid
 from pathlib import Path
 
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     DECISIONAL_TOOLS as _DECISIONAL_TOOLS,
 )
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     DUMB_TOOLS as _DUMB_TOOLS,
 )
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     FILE_REF_RE as _FILE_REF_RE,
 )
 
@@ -31,10 +31,6 @@ _COMPRESS_THRESHOLD_CHARS = 2000  # ~500 tokens — compress above this
 _COMPRESS_TARGET_CHARS = 800  # ~200 tokens — target after compression
 
 # Intent keywords for tool prediction
-_FIX_KEYWORDS = re.compile(
-    r"\b(fix|bug|error|crash|corrige|corriger|erreur|debug|broken|failing)\b",
-    re.IGNORECASE,
-)
 _TEST_KEYWORDS = re.compile(
     r"\b(test|tests|spec|coverage|teste|testes)\b",
     re.IGNORECASE,

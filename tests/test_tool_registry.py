@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     CANONICAL_HANDLERS,
     DECISIONAL_TOOLS,
     DUMB_TOOLS,
@@ -109,13 +109,13 @@ class TestCategoryToolSets:
 class TestAnticipatorAlignment:
     def test_anticipator_safe_tools_matches_registry(self):
         """ToolAnticipator.SAFE_TOOLS must equal EXECUTABLE_TOOLS from registry."""
-        from smartsplit.tool_anticipator import ToolAnticipator
+        from smartsplit.tools.anticipator import ToolAnticipator
 
         assert ToolAnticipator.SAFE_TOOLS == EXECUTABLE_TOOLS
 
     def test_anticipator_alias_matches_registry(self):
         """ToolAnticipator._TOOL_ALIAS must equal TOOL_ALIAS from registry."""
-        from smartsplit.tool_anticipator import ToolAnticipator
+        from smartsplit.tools.anticipator import ToolAnticipator
 
         assert ToolAnticipator._TOOL_ALIAS == TOOL_ALIAS
 
@@ -123,6 +123,6 @@ class TestAnticipatorAlignment:
 class TestDetectorAlignment:
     def test_detector_safe_tools_matches_registry(self):
         """intention_detector.SAFE_TOOLS must be the same object from registry."""
-        from smartsplit.intention_detector import SAFE_TOOLS as DETECTOR_SAFE_TOOLS
+        from smartsplit.tools.intention_detector import SAFE_TOOLS as DETECTOR_SAFE_TOOLS
 
         assert DETECTOR_SAFE_TOOLS is SAFE_TOOLS

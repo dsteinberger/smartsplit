@@ -20,14 +20,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from smartsplit.exceptions import SmartSplitError
-from smartsplit.planner import _extract_json
-from smartsplit.tool_registry import FILE_REF_RE as _FILE_REF_RE
-from smartsplit.tool_registry import SAFE_TOOLS
-from smartsplit.tool_registry import WELL_KNOWN_FILES as _WELL_KNOWN_FILES
+from smartsplit.json_utils import extract_json
+from smartsplit.tools.registry import FILE_REF_RE as _FILE_REF_RE
+from smartsplit.tools.registry import SAFE_TOOLS
+from smartsplit.tools.registry import WELL_KNOWN_FILES as _WELL_KNOWN_FILES
 
 if TYPE_CHECKING:
     from smartsplit.providers.registry import ProviderRegistry
-    from smartsplit.tool_pattern_learner import ToolPatternLearner
+    from smartsplit.tools.pattern_learner import ToolPatternLearner
 
 logger = logging.getLogger("smartsplit.intention_detector")
 
@@ -93,7 +93,7 @@ _SEARCH_KEYWORDS = [
 _TEST_KEYWORDS = ["test", "tests", "spec", "coverage", "unit test", "integration test"]
 
 # Merge multilingual intent keywords
-from smartsplit.i18n_keywords import INTENT_KEYWORDS_I18N  # noqa: E402
+from smartsplit.triage.i18n_keywords import INTENT_KEYWORDS_I18N  # noqa: E402
 
 for _lang_kw in INTENT_KEYWORDS_I18N.values():
     _FIX_KEYWORDS.extend(_lang_kw.get("fix_debug", []))
@@ -107,19 +107,8 @@ _TEST_KEYWORDS = list(dict.fromkeys(_TEST_KEYWORDS))
 _STACKTRACE_RE = re.compile(r"(File \"([^\"]+)\", line \d+|at .+\((.+\.\w+:\d+)\))", re.MULTILINE)
 
 
-def _predict_from_rules(user_content: str) -> Prediction:
-    """Predict tool calls from prompt patterns — no LLM needed.
-
-    Based on research: 90%+ of first tool calls are predictable from the prompt.
-    Priority: file mentions > stacktrace > search intent > explain/fix/test intent.
-    """
-    tools: list[AnticipatedTool] = []
-
-    # 1. File paths mentioned → Read them (95% confidence)
-    # Only match paths that look like real project files:
-    # Only keep paths that look like real project files.
-    # Skip bare names like "Next.js", "settings.json" that appear in documentation.
-    _CODE_EXTENSIONS = {
+_CODE_EXTENSIONS: frozenset[str] = frozenset(
+    {
         ".py",
         ".ts",
         ".tsx",
@@ -140,85 +129,93 @@ def _predict_from_rules(user_content: str) -> Prediction:
         ".sql",
         ".r",
     }
-    raw_paths = list(dict.fromkeys(_FILE_REF_RE.findall(user_content)))
-    paths = []
-    for p in raw_paths:
-        ext = "." + p.rsplit(".", 1)[-1] if "." in p else ""
-        if "/" in p or p.startswith(".") or p in _WELL_KNOWN_FILES or ext in _CODE_EXTENSIONS:
-            paths.append(p)
-    for path in paths[:3]:
-        tools.append(
-            AnticipatedTool(
-                tool="read_file",
-                args={"path": path},
-                reason="file mentioned in prompt",
-                confidence=0.95,
-            )
-        )
+)
 
-    # 2. Stacktrace pasted → Read files from the trace (95% confidence)
+
+def _looks_like_project_path(path: str) -> bool:
+    """Return True if ``path`` looks like a real project file (not doc jargon)."""
+    ext = "." + path.rsplit(".", 1)[-1] if "." in path else ""
+    return "/" in path or path.startswith(".") or path in _WELL_KNOWN_FILES or ext in _CODE_EXTENSIONS
+
+
+def _predict_file_mentions(user_content: str) -> tuple[list[AnticipatedTool], list[str]]:
+    """Rule 1: file paths referenced in the prompt → read them."""
+    raw = list(dict.fromkeys(_FILE_REF_RE.findall(user_content)))
+    paths = [p for p in raw if _looks_like_project_path(p)]
+    tools = [
+        AnticipatedTool(tool="read_file", args={"path": path}, reason="file mentioned in prompt", confidence=0.95)
+        for path in paths[:3]
+    ]
+    return tools, paths
+
+
+def _predict_stacktrace(user_content: str, existing: list[AnticipatedTool]) -> list[AnticipatedTool]:
+    """Rule 2: stacktrace pasted → read files from the trace (skip dups)."""
     trace_files: list[str] = []
     for match in _STACKTRACE_RE.finditer(user_content):
-        # Python: File "path", line N
-        if match.group(2):
+        if match.group(2):  # Python: File "path", line N
             trace_files.append(match.group(2))
-        # JS/TS: at foo (path:line)
-        elif match.group(3):
+        elif match.group(3):  # JS/TS: at foo (path:line)
             trace_files.append(match.group(3).split(":")[0])
-    for path in list(dict.fromkeys(trace_files))[:2]:
-        if not any(t.args.get("path") == path for t in tools):
-            tools.append(
+    known = {t.args.get("path") for t in existing}
+    return [
+        AnticipatedTool(tool="read_file", args={"path": path}, reason="file from stacktrace", confidence=0.93)
+        for path in list(dict.fromkeys(trace_files))[:2]
+        if path not in known
+    ]
+
+
+def _predict_grep_intent(prompt_lower: str) -> AnticipatedTool | None:
+    """Rules 3 & 4: search or error intent without known paths → grep."""
+    if any(kw in prompt_lower for kw in _SEARCH_KEYWORDS):
+        return AnticipatedTool(tool="grep", args={}, reason="search intent detected", confidence=0.85)
+    if any(kw in prompt_lower for kw in _FIX_KEYWORDS):
+        return AnticipatedTool(tool="grep", args={}, reason="error/debug intent detected", confidence=0.80)
+    return None
+
+
+def _predict_test_files(prompt_lower: str, paths: list[str], existing: list[AnticipatedTool]) -> list[AnticipatedTool]:
+    """Rule 5: test intent → also read the likely test file for mentioned .py sources."""
+    if not (any(kw in prompt_lower for kw in _TEST_KEYWORDS) and paths):
+        return []
+    known = {t.args.get("path") for t in existing}
+    out: list[AnticipatedTool] = []
+    for path in paths[:1]:
+        name = path.rsplit("/", 1)[-1]
+        if not name.endswith(".py"):
+            continue
+        stem = name.rsplit(".", 1)[0]
+        test_path = "test_" + stem + ".py"
+        if test_path not in known:
+            out.append(
                 AnticipatedTool(
                     tool="read_file",
-                    args={"path": path},
-                    reason="file from stacktrace",
-                    confidence=0.93,
+                    args={"path": test_path},
+                    reason="test intent: likely test file",
+                    confidence=0.80,
                 )
             )
+    return out
 
-    # 3. Search intent → Grep (95% confidence)
+
+def _predict_from_rules(user_content: str) -> Prediction:
+    """Predict tool calls from prompt patterns — no LLM needed.
+
+    Based on research: 90%+ of first tool calls are predictable from the prompt.
+    Priority: file mentions > stacktrace > search intent > explain/fix/test intent.
+    """
+    tools, paths = _predict_file_mentions(user_content)
+    tools.extend(_predict_stacktrace(user_content, tools))
+
     prompt_lower = user_content.lower()
-    if any(kw in prompt_lower for kw in _SEARCH_KEYWORDS) and not tools:
-        tools.append(
-            AnticipatedTool(
-                tool="grep",
-                args={},
-                reason="search intent detected",
-                confidence=0.85,
-            )
-        )
+    if not tools:
+        grep = _predict_grep_intent(prompt_lower)
+        if grep is not None:
+            tools.append(grep)
 
-    # 4. Error intent without files → Grep for error pattern (90% confidence)
-    if any(kw in prompt_lower for kw in _FIX_KEYWORDS) and not tools:
-        tools.append(
-            AnticipatedTool(
-                tool="grep",
-                args={},
-                reason="error/debug intent detected",
-                confidence=0.80,
-            )
-        )
+    tools.extend(_predict_test_files(prompt_lower, paths, tools))
 
-    # 5. Test intent → Read source file then look for test files (90% confidence)
-    if any(kw in prompt_lower for kw in _TEST_KEYWORDS) and paths:
-        for path in paths[:1]:
-            # Predict reading the test file too
-            name = path.rsplit("/", 1)[-1]
-            stem = name.rsplit(".", 1)[0]
-            test_path = "test_" + stem + ".py" if name.endswith(".py") else ""
-            if test_path and not any(t.args.get("path") == test_path for t in tools):
-                tools.append(
-                    AnticipatedTool(
-                        tool="read_file",
-                        args={"path": test_path},
-                        reason="test intent: likely test file",
-                        confidence=0.80,
-                    )
-                )
-
-    # Cap at 3
     tools = tools[:3]
-
     if not tools:
         return _NULL_PREDICTION
 
@@ -451,7 +448,7 @@ class IntentionDetector:
         """Send prompt to free LLM, parse JSON response into Prediction."""
         try:
             raw = await self._registry.call_free_llm(prompt, prefer="cerebras")
-            cleaned = _extract_json(raw)
+            cleaned = extract_json(raw)
             data = json.loads(cleaned)
 
             should_anticipate = bool(data.get("should_anticipate", False))

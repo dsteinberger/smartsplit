@@ -12,12 +12,16 @@ import pytest
 from smartsplit.config import ProviderConfig
 from smartsplit.exceptions import NoProviderAvailableError, ProviderError
 from smartsplit.models import ContextTier, TokenUsage
+from smartsplit.providers.anthropic_adapter import (
+    anthropic_to_openai as _convert_from_anthropic,
+)
+from smartsplit.providers.anthropic_adapter import (
+    openai_to_anthropic as _convert_to_anthropic,
+)
 from smartsplit.providers.base import LLMProvider, SearchProvider
 from smartsplit.providers.registry import (
     _CONTEXT_TIER_MAX_CHARS,
     ProviderRegistry,
-    _convert_from_anthropic,
-    _convert_to_anthropic,
     _failure_weight,
     _sanitize_error,
 )

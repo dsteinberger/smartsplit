@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock
 from starlette.testclient import TestClient
 
 from smartsplit.exceptions import ProviderError
-from smartsplit.intention_detector import AnticipatedTool, Prediction
 from smartsplit.models import TokenUsage
-from smartsplit.pipeline import create_app
+from smartsplit.proxy.pipeline import create_app
+from smartsplit.tools.intention_detector import AnticipatedTool, Prediction
 
 
 def _make_app(providers=None, mode="balanced"):

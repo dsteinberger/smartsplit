@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from smartsplit.proxy import (
+from smartsplit.proxy.server import (
     _LLM_HOSTS,
     _SMARTSPLIT_PATHS,
     _build_http_response,

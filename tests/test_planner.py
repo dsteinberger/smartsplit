@@ -7,12 +7,12 @@ import json
 import pytest
 
 from smartsplit.exceptions import ProviderError
+from smartsplit.json_utils import extract_json
 from smartsplit.models import Mode, RouteResult, Subtask, TaskType
-from smartsplit.planner import (
+from smartsplit.triage.planner import (
     MAX_SUBTASKS,
     Planner,
     _DecomposeCache,
-    _extract_json,
     detect_domains,
 )
 
@@ -47,7 +47,7 @@ class TestExtractJson:
         ],
     )
     def test_extraction(self, raw, expected):
-        assert _extract_json(raw) == expected
+        assert extract_json(raw) == expected
 
 
 # ── Keyword Fallback Detection ─────────────────────────────

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from smartsplit.learning import BanditScorer
+from smartsplit.routing.learning import BanditScorer
 
 
 class TestBanditScorer:

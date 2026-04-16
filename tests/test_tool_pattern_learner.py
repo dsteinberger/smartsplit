@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-from smartsplit.tool_pattern_learner import (
+from smartsplit.tools.pattern_learner import (
     ToolPatternLearner,
     _abstract_tool_call,
     _extract_context_signals,

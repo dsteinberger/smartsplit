@@ -150,7 +150,7 @@ ENRICHMENT_PROMPTS = [
 
 def run_detector_benchmark() -> dict:
     """Test detector accuracy — no API keys needed."""
-    from smartsplit.detector import detect
+    from smartsplit.triage.detector import detect
 
     results = {"correct": 0, "wrong": 0, "details": []}
 
@@ -181,8 +181,8 @@ def run_detector_benchmark() -> dict:
 
 async def run_prediction_benchmark(registry: object) -> dict:
     """Test tool prediction accuracy — needs free LLM API keys."""
-    from smartsplit.intention_detector import IntentionDetector
-    from smartsplit.tool_pattern_learner import ToolPatternLearner
+    from smartsplit.tools.intention_detector import IntentionDetector
+    from smartsplit.tools.pattern_learner import ToolPatternLearner
 
     pattern_learner = ToolPatternLearner(project_dir=".")
     detector = IntentionDetector(registry, pattern_learner=pattern_learner)
@@ -243,12 +243,12 @@ async def run_enrichment_benchmark(registry: object, http: object) -> dict:
     Uses a separate LLM as judge to compare quality.
     """
     from smartsplit.config import load_config
-    from smartsplit.enrichment import enrich_only
-    from smartsplit.learning import BanditScorer
-    from smartsplit.pipeline import ProxyContext
-    from smartsplit.planner import Planner
-    from smartsplit.quota import QuotaTracker
-    from smartsplit.router import Router
+    from smartsplit.triage.enrichment import enrich_only
+    from smartsplit.routing.learning import BanditScorer
+    from smartsplit.proxy.pipeline import ProxyContext
+    from smartsplit.triage.planner import Planner
+    from smartsplit.routing.quota import QuotaTracker
+    from smartsplit.routing.router import Router
 
     cfg = load_config()
     quota = QuotaTracker(provider_configs=cfg.providers)

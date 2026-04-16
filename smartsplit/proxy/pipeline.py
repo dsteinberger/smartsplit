@@ -29,16 +29,20 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from smartsplit.anticipation import (
-    extract_actual_tool_calls,
-)
 from smartsplit.config import SmartSplitConfig, load_config
-from smartsplit.detector import _LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
-from smartsplit.enrichment import (
-    enrich_and_forward,
-    enrich_only,
+from smartsplit.exceptions import ConfigError, ProviderError
+from smartsplit.models import (
+    Mode,
+    ProviderType,
+    RequestLog,
+    RouteResult,
+    RoutingStep,
+    TaskType,
+    TerminationState,
+    short_id,
 )
-from smartsplit.formats import (
+from smartsplit.providers.registry import _PROVIDER_CALL_TIMEOUT, ProviderRegistry
+from smartsplit.proxy.formats import (
     OpenAIRequest,
     anthropic_has_tool_named,
     anthropic_has_tool_result,
@@ -58,24 +62,21 @@ from smartsplit.formats import (
     stream_chunks,
     strip_agent_metadata,
 )
-from smartsplit.intention_detector import IntentionDetector
-from smartsplit.learning import BanditScorer
-from smartsplit.models import (
-    Mode,
-    ProviderType,
-    RequestLog,
-    RouteResult,
-    RoutingStep,
-    TaskType,
-    TerminationState,
-    short_id,
+from smartsplit.routing.learning import BanditScorer
+from smartsplit.routing.quota import QuotaTracker
+from smartsplit.routing.router import Router
+from smartsplit.tools.anticipation import (
+    extract_actual_tool_calls,
 )
-from smartsplit.planner import Planner
-from smartsplit.providers.registry import _PROVIDER_CALL_TIMEOUT, ProviderRegistry
-from smartsplit.quota import QuotaTracker
-from smartsplit.router import Router
-from smartsplit.tool_anticipator import ToolAnticipator
-from smartsplit.tool_pattern_learner import ToolPatternLearner
+from smartsplit.tools.anticipator import ToolAnticipator
+from smartsplit.tools.intention_detector import IntentionDetector
+from smartsplit.tools.pattern_learner import ToolPatternLearner
+from smartsplit.triage.detector import _LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
+from smartsplit.triage.enrichment import (
+    enrich_and_forward,
+    enrich_only,
+)
+from smartsplit.triage.planner import Planner
 
 logger = logging.getLogger("smartsplit.proxy")
 
@@ -144,6 +145,51 @@ class ProxyContext:
     enrichment_skip_until: float = 0.0  # 0 = enrichment allowed
 
 
+# ── Context factory ────────────────────────────────────────────
+
+
+def build_proxy_context(cfg: SmartSplitConfig, mode: Mode, *, read_timeout: float = 30.0) -> ProxyContext:
+    """Construct a fully-initialized ``ProxyContext`` (registry + planner + router + anticipation).
+
+    Caller is responsible for ``shutdown_proxy_context(ctx)`` on teardown.
+    """
+    http = httpx.AsyncClient(
+        http2=True,
+        timeout=httpx.Timeout(connect=5.0, read=read_timeout, write=10.0, pool=5.0),
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+    )
+    quota = QuotaTracker(provider_configs=cfg.providers)
+    registry = ProviderRegistry(cfg.providers, http, free_llm_priority=cfg.free_llm_priority, brain_name=cfg.brain)
+    planner = Planner(registry)
+    bandit = BanditScorer()
+    router = Router(registry, quota, cfg, bandit=bandit)
+    pattern_learner = ToolPatternLearner(project_dir=".")
+    detector = IntentionDetector(registry, pattern_learner=pattern_learner)
+    anticipator = ToolAnticipator(registry, working_dir=".")
+    return ProxyContext(
+        config=cfg,
+        registry=registry,
+        planner=planner,
+        router=router,
+        quota=quota,
+        bandit=bandit,
+        http=http,
+        mode=mode,
+        detector=detector,
+        anticipator=anticipator,
+        pattern_learner=pattern_learner,
+    )
+
+
+async def shutdown_proxy_context(ctx: ProxyContext) -> None:
+    """Flush persistent state and close the shared HTTP client."""
+    ctx.quota.flush()
+    ctx.bandit.flush()
+    if ctx.pattern_learner is not None:
+        ctx.pattern_learner.flush()
+    await ctx.http.aclose()
+
+
 # ── Helpers ────────────────────────────────────────────────────
 
 
@@ -191,6 +237,126 @@ class PipelineResult:
         return self.streaming_response is not None
 
 
+def _record_pattern_learning(ctx: ProxyContext, body_dict: dict) -> None:
+    """Feed observed tool calls back into the pattern learner (best-effort)."""
+    if not ctx.pattern_learner:
+        return
+    try:
+        openai_body = anthropic_messages_to_openai(body_dict)
+        actual_tools = extract_actual_tool_calls(openai_body.get("messages", []))
+        if actual_tools:
+            ctx.pattern_learner.observe_outcome(actual_tools, openai_body.get("messages", []))
+    except (AttributeError, TypeError, KeyError):
+        pass
+
+
+async def _try_fake_tool_use(ctx: ProxyContext, body_dict: dict, request_id: str, model: str) -> dict | None:
+    """Return a FAKE tool_use action if high-confidence reads are predicted, else None."""
+    if not ctx.detector:
+        return None
+    try:
+        openai_body = anthropic_messages_to_openai(body_dict)
+    except (AttributeError, TypeError, KeyError):
+        return None
+    if not openai_body:
+        return None
+    prediction = await ctx.detector.predict(openai_body.get("messages", []), openai_body.get("tools"))
+    fake_tools = [
+        {"tool": t.tool, "input": dict(t.args)} for t in prediction.tools if t.confidence >= _FAKE_TOOL_CONFIDENCE
+    ]
+    if not fake_tools:
+        return None
+    ctx.anticipation_stats["predictions_made"] += 1
+    logger.info(
+        "[%s] FAKE tool_use: %s (confidence>=%s)",
+        request_id,
+        [t["tool"] for t in fake_tools],
+        _FAKE_TOOL_CONFIDENCE,
+    )
+    return {"type": "fake", "body": build_fake_anthropic_tool_response(fake_tools, model=model)}
+
+
+def _filter_useful_enrichments(
+    ctx: ProxyContext, body_dict: dict, triage_prompt: str, flat_messages: list[dict], request_id: str
+) -> tuple[TriageDecision, list[str]]:
+    """Run the detector and trim enrichment types to what proxy mode can actually use."""
+    if not ctx.enabled:
+        return TriageDecision.TRANSPARENT, []
+
+    decision, enrichment_types = detect(triage_prompt, flat_messages)
+    enrichment_types = [e for e in enrichment_types if e in _PROXY_USEFUL_ENRICHMENTS]
+
+    # Drop web_search if we have neither a search provider nor a client-side search tool.
+    if "web_search" in enrichment_types:
+        has_search_provider = bool(ctx.registry.get_search_providers())
+        agent_has_search = anthropic_has_tool_named(body_dict, "web_search", "WebSearch")
+        if not has_search_provider and not agent_has_search:
+            enrichment_types = [e for e in enrichment_types if e != "web_search"]
+            logger.info("[%s] Skipped web_search (no provider, no agent tool)", request_id)
+
+    if not enrichment_types:
+        return TriageDecision.TRANSPARENT, []
+    return decision, enrichment_types
+
+
+def _inject_worker_context(body_dict: dict, enrichment_results: list[RouteResult], request_id: str) -> dict | None:
+    """Inject worker results into the Anthropic system message. Returns the new body, or None."""
+    worker_context = "\n".join(f"[{r.type.value}]: {r.response}" for r in enrichment_results if r.response)
+    if not worker_context:
+        return None
+    logger.info("[%s] Enriched with %s worker results", request_id, len(enrichment_results))
+    return inject_anthropic_system_context(body_dict, worker_context)
+
+
+def _fake_web_search_fallback(
+    ctx: ProxyContext, body_dict: dict, triage_prompt: str, model: str, request_id: str
+) -> dict:
+    """Build a FAKE tool_use action when our web_search failed but the agent has the tool."""
+    search_query = getattr(ctx, "_last_search_query", triage_prompt[:200])
+    agent_tool_name = "WebSearch" if anthropic_has_tool_named(body_dict, "WebSearch") else "web_search"
+    logger.info("[%s] Serper failed → FAKE %s(%s)", request_id, agent_tool_name, search_query[:60])
+    fake_tools = [{"tool": agent_tool_name, "input": {"query": search_query}}]
+    return {"type": "fake", "body": build_fake_anthropic_tool_response(fake_tools, model=model)}
+
+
+async def _run_enrichment_phase(
+    ctx: ProxyContext, body_dict: dict, triage_prompt: str, model: str, request_id: str
+) -> tuple[dict, bool, dict | None]:
+    """Run the enrichment phase. Returns ``(body_dict, modified, fake_action_or_None)``."""
+    if not triage_prompt:
+        return body_dict, False, None
+    if time.time() < ctx.enrichment_skip_until:
+        remaining = int(ctx.enrichment_skip_until - time.time())
+        logger.info("[%s] Skipped enrichment (backoff %ss remaining)", request_id, remaining)
+        return body_dict, False, None
+
+    flat_messages = anthropic_to_flat_messages(body_dict)
+    decision, enrichment_types = _filter_useful_enrichments(ctx, body_dict, triage_prompt, flat_messages, request_id)
+    if decision != TriageDecision.ENRICH:
+        return body_dict, False, None
+
+    try:
+        enrichment_results = await enrich_only(ctx, triage_prompt, enrichment_types, messages=flat_messages)
+    except Exception as exc:
+        logger.debug("[%s] Enrichment failed: %s", request_id, type(exc).__name__)
+        return body_dict, False, None
+
+    modified = False
+    if enrichment_results:
+        new_body = _inject_worker_context(body_dict, enrichment_results, request_id)
+        if new_body is not None:
+            body_dict = new_body
+            modified = True
+
+    web_search_failed = "web_search" in enrichment_types and not any(
+        r.type == TaskType.WEB_SEARCH and r.response for r in enrichment_results
+    )
+    if web_search_failed and anthropic_has_tool_named(body_dict, "web_search", "WebSearch"):
+        return body_dict, modified, _fake_web_search_fallback(ctx, body_dict, triage_prompt, model, request_id)
+
+    return body_dict, modified, None
+
+
 async def _run_pipeline(
     ctx: ProxyContext,
     body_dict: dict,
@@ -206,110 +372,27 @@ async def _run_pipeline(
       {"type": "passthrough"}            — nothing to do
     """
     prompt = extract_anthropic_prompt(body_dict)
-    has_tools = anthropic_has_tools(body_dict)
-    model = body_dict.get("model", "")
     triage_prompt = strip_agent_metadata(prompt)
-    modified = False
+    model = body_dict.get("model", "")
 
-    # ── Agent mode: tools present ──
-    if has_tools:
+    # Agent mode: tools present → pattern learning + optional FAKE tool_use.
+    if anthropic_has_tools(body_dict):
         ctx.anticipation_stats["requests_with_tools"] += 1
+        _record_pattern_learning(ctx, body_dict)
+        if not anthropic_has_tool_result(body_dict):
+            fake = await _try_fake_tool_use(ctx, body_dict, request_id, model)
+            if fake is not None:
+                return fake
+        # NOTE: No local tool pre-execution — the agent executes tools itself, and
+        # SmartSplit has no access to its filesystem in proxy mode.
 
-        # Pattern learning feedback
-        if ctx.pattern_learner:
-            try:
-                openai_body = anthropic_messages_to_openai(body_dict)
-                actual_tools = extract_actual_tool_calls(openai_body.get("messages", []))
-                if actual_tools:
-                    ctx.pattern_learner.observe_outcome(actual_tools, openai_body.get("messages", []))
-            except (AttributeError, TypeError, KeyError):
-                pass
-
-        has_tool_result = anthropic_has_tool_result(body_dict)
-
-        # Fake tool_use (high confidence reads)
-        if ctx.detector and not has_tool_result:
-            try:
-                openai_body = anthropic_messages_to_openai(body_dict)
-            except (AttributeError, TypeError, KeyError):
-                openai_body = {}
-            if openai_body:
-                prediction = await ctx.detector.predict(openai_body.get("messages", []), openai_body.get("tools"))
-                fake_tools = [
-                    {"tool": t.tool, "input": dict(t.args)}
-                    for t in prediction.tools
-                    if t.confidence >= _FAKE_TOOL_CONFIDENCE
-                ]
-                if fake_tools:
-                    ctx.anticipation_stats["predictions_made"] += 1
-                    logger.info(
-                        "[%s] FAKE tool_use: %s (confidence>=%s)",
-                        request_id,
-                        [t["tool"] for t in fake_tools],
-                        _FAKE_TOOL_CONFIDENCE,
-                    )
-                    return {"type": "fake", "body": build_fake_anthropic_tool_response(fake_tools, model=model)}
-
-        # NOTE: No local tool pre-execution here. In proxy mode, SmartSplit doesn't have
-        # access to the client's filesystem, and even locally it's redundant — the agent
-        # executes tools itself in milliseconds. FAKE tool_use above is sufficient.
-
-    # ── Enrichment (workers only, no brain call) ──
-    # Skip if in backoff period (previous enrichment caused a 429 from the brain)
-    enrichment_allowed = time.time() >= ctx.enrichment_skip_until
-    if triage_prompt and enrichment_allowed:
-        flat_messages = anthropic_to_flat_messages(body_dict)
-        if ctx.enabled:
-            decision, enrichment_types = detect(triage_prompt, flat_messages)
-            # Filter to only useful enrichments (skip context_summary — redundant when brain has full context)
-            enrichment_types = [e for e in enrichment_types if e in _PROXY_USEFUL_ENRICHMENTS]
-
-            # Guard: skip web_search if no search provider AND agent has no search tool
-            if "web_search" in enrichment_types:
-                has_search_provider = bool(ctx.registry.get_search_providers())
-                agent_has_search = anthropic_has_tool_named(body_dict, "web_search", "WebSearch")
-                if not has_search_provider and not agent_has_search:
-                    enrichment_types = [e for e in enrichment_types if e != "web_search"]
-                    logger.info("[%s] Skipped web_search (no provider, no agent tool)", request_id)
-
-            if not enrichment_types:
-                decision = TriageDecision.TRANSPARENT
-        else:
-            decision = TriageDecision.TRANSPARENT
-
-        if decision == TriageDecision.ENRICH:
-            try:
-                enrichment_results = await enrich_only(ctx, triage_prompt, enrichment_types, messages=flat_messages)
-                web_search_failed = "web_search" in enrichment_types and not any(
-                    r.type == TaskType.WEB_SEARCH and r.response for r in enrichment_results
-                )
-
-                if enrichment_results:
-                    worker_context = "\n".join(
-                        f"[{r.type.value}]: {r.response}" for r in enrichment_results if r.response
-                    )
-                    if worker_context:
-                        body_dict = inject_anthropic_system_context(body_dict, worker_context)
-                        modified = True
-                        logger.info("[%s] Enriched with %s worker results", request_id, len(enrichment_results))
-
-                # Cascade: web_search failed but agent has the tool → FAKE tool_use
-                if web_search_failed and anthropic_has_tool_named(body_dict, "web_search", "WebSearch"):
-                    search_query = getattr(ctx, "_last_search_query", triage_prompt[:200])
-                    agent_tool_name = "WebSearch" if anthropic_has_tool_named(body_dict, "WebSearch") else "web_search"
-                    logger.info("[%s] Serper failed → FAKE %s(%s)", request_id, agent_tool_name, search_query[:60])
-                    fake_tools = [{"tool": agent_tool_name, "input": {"query": search_query}}]
-                    return {"type": "fake", "body": build_fake_anthropic_tool_response(fake_tools, model=model)}
-
-            except Exception as exc:
-                logger.debug("[%s] Enrichment failed: %s", request_id, type(exc).__name__)
-    elif triage_prompt and not enrichment_allowed:
-        remaining = int(ctx.enrichment_skip_until - time.time())
-        logger.info("[%s] Skipped enrichment (backoff %ss remaining)", request_id, remaining)
+    # Enrichment (workers only, no brain call).
+    body_dict, modified, fake_action = await _run_enrichment_phase(ctx, body_dict, triage_prompt, model, request_id)
+    if fake_action is not None:
+        return fake_action
 
     if modified:
         return {"type": "modified", "body": body_dict}
-
     return {"type": "passthrough"}
 
 
@@ -359,7 +442,10 @@ async def process_anthropic_request(
     auth_header = request_headers.get("authorization", "") or request_headers.get("x-api-key", "")
     anthropic_provider = ctx.registry.get("anthropic")
     has_anthropic_key = anthropic_provider is not None and anthropic_provider.api_key
-    brain_is_anthropic = ctx.registry.brain_name == "anthropic" or (auth_header and not has_anthropic_key)
+    brain = ctx.registry.get(ctx.registry.brain_name) if ctx.registry.brain_name else None
+    brain_speaks_anthropic = brain is not None and getattr(brain, "native_format", "openai") == "anthropic"
+    client_passthrough = bool(auth_header) and not has_anthropic_key
+    brain_is_anthropic = brain_speaks_anthropic or client_passthrough
     passthrough_headers: dict[str, str] = {}
     if brain_is_anthropic and not has_anthropic_key:
         for key, value in request_headers.items():
@@ -466,7 +552,7 @@ async def _forward_to_anthropic_host(
     else:
         provider = ctx.registry.get("anthropic")
         if not provider or not provider.api_key:
-            raise Exception("No Anthropic auth available")
+            raise ConfigError("No Anthropic auth available")
         proxy_body["model"] = provider.config.model
         headers = {
             "x-api-key": provider.api_key,
@@ -490,7 +576,7 @@ async def _forward_to_anthropic_host(
 
         if response.status_code >= 400:
             await response.aclose()
-            raise Exception(f"{host} returned {response.status_code}")
+            raise ProviderError("anthropic", f"{host} returned {response.status_code}")
 
         logger.info("Proxied request (streaming) to %s successfully", host)
         # Forward all response headers
@@ -586,41 +672,195 @@ _MAX_REQUEST_BYTES = 1_000_000  # 1MB
 _TRUNCATION_LIMITS = [400_000, 100_000, 50_000, 20_000]
 
 
+def _parse_completions_body(body: bytes) -> tuple[OpenAIRequest | None, dict | None, JSONResponse | None]:
+    """Parse + validate an OpenAI completions request body. Returns (parsed, body_dict, error)."""
+    if len(body) > _MAX_REQUEST_BYTES:
+        return (
+            None,
+            None,
+            JSONResponse(
+                {"error": {"message": "Request too large", "type": "invalid_request_error"}},
+                status_code=413,
+            ),
+        )
+    try:
+        body_dict = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return (
+            None,
+            None,
+            JSONResponse(
+                {"error": {"message": "Invalid JSON in request body", "type": "invalid_request_error"}},
+                status_code=400,
+            ),
+        )
+    try:
+        parsed = OpenAIRequest.model_validate(body_dict)
+    except (ValueError, TypeError):
+        return (
+            None,
+            None,
+            JSONResponse(
+                {"error": {"message": "Invalid request format", "type": "invalid_request_error"}},
+                status_code=400,
+            ),
+        )
+    return parsed, body_dict, None
+
+
+async def _triage_request(
+    ctx: ProxyContext, triage_prompt: str, raw_messages: list[dict[str, str]]
+) -> tuple[TriageDecision, list[str]]:
+    """Two-phase triage: keyword fast-path, LLM fallback for longer prompts."""
+    if not triage_prompt or not ctx.enabled:
+        return TriageDecision.TRANSPARENT, []
+    decision, enrichment_types = detect(triage_prompt, raw_messages)
+    if decision == TriageDecision.TRANSPARENT and len(triage_prompt.strip()) >= _LLM_DETECT_MIN_CHARS:
+        decision, enrichment_types = await detect_with_llm(triage_prompt, ctx.registry)
+    return decision, enrichment_types
+
+
+def _openai_stream_response(payload: dict, model: str) -> StreamingResponse:
+    """Wrap an OpenAI-format payload as an SSE streaming response."""
+    return StreamingResponse(
+        iter_sse(response_to_sse_chunks(payload, model)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _handle_agent_mode(
+    ctx: ProxyContext,
+    parsed: OpenAIRequest,
+    body_dict: dict,
+    prompt: str,
+    raw_messages: list[dict[str, str]],
+    triage_prompt: str,
+    decision: TriageDecision,
+    enrichment_types: list[str],
+    request_id: str,
+    request_start: float,
+) -> JSONResponse | StreamingResponse:
+    """Run the agent-mode branch: pattern learning + FAKE tool_use + enrichment + brain proxy."""
+    ctx.anticipation_stats["requests_with_tools"] += 1
+
+    if ctx.pattern_learner:
+        actual_tools = extract_actual_tool_calls(body_dict.get("messages", []))
+        if actual_tools:
+            ctx.pattern_learner.observe_outcome(actual_tools, body_dict.get("messages", []))
+
+    has_tool_result = any(m.get("role") == "tool" for m in body_dict.get("messages", []))
+    if has_tool_result and ctx.pending_fakes.pop(request_id, False):
+        logger.info("[%s] Tool results received after fake, forwarding to brain", request_id)
+
+    try:
+        # Kick off enrichment workers concurrently (brain=client's LLM, no brain call here).
+        enrichment_task: asyncio.Task | None = None
+        if decision == TriageDecision.ENRICH:
+            enrichment_task = asyncio.create_task(
+                enrich_only(ctx, triage_prompt, enrichment_types, messages=raw_messages)
+            )
+
+        # FAKE tool_use: predict read-only tools and return without hitting the brain.
+        if ctx.detector and not has_tool_result:
+            prediction = await ctx.detector.predict(body_dict.get("messages", []), parsed.tools)
+            fake_tools = [
+                {"tool": t.tool, "input": dict(t.args)}
+                for t in prediction.tools
+                if t.confidence >= _FAKE_TOOL_CONFIDENCE
+            ]
+            if fake_tools:
+                ctx.anticipation_stats["predictions_made"] += 1
+                logger.info(
+                    "[%s] FAKE tool_use: %s (confidence>=%s)",
+                    request_id,
+                    [t["tool"] for t in fake_tools],
+                    _FAKE_TOOL_CONFIDENCE,
+                )
+                if enrichment_task:
+                    enrichment_task.cancel()
+                fake_response = build_fake_openai_tool_response(fake_tools, model=parsed.model)
+                if parsed.stream:
+                    return _openai_stream_response(fake_response, parsed.model)
+                return JSONResponse(fake_response)
+
+        # Inject enrichment results into the request before proxying.
+        if enrichment_task:
+            enrichment_results = await enrichment_task
+            if enrichment_results:
+                from smartsplit.triage.enrichment import _build_enriched_messages
+
+                body_dict["messages"] = _build_enriched_messages(raw_messages, prompt, enrichment_results)
+                logger.info("[%s] Enriched agent request with %s worker results", request_id, len(enrichment_results))
+
+        raw_response = await ctx.registry.proxy_to_brain(body_dict)
+        elapsed = int((time.monotonic() - request_start) * 1000)
+        logger.info("[%s] Done (agent mode): %sms", request_id, elapsed)
+
+        if parsed.stream:
+            return _openai_stream_response(raw_response, parsed.model)
+        return JSONResponse(raw_response)
+
+    except Exception as e:
+        logger.error("[%s] Agent mode failed: %s", request_id, type(e).__name__)
+        return JSONResponse(
+            {"error": {"message": "Proxy to brain failed, please retry", "type": "server_error"}},
+            status_code=502,
+        )
+
+
+async def _retry_with_truncation(
+    ctx: ProxyContext,
+    prompt: str,
+    raw_messages: list[dict[str, str]],
+    request_id: str,
+) -> tuple[str | None, list[RouteResult]]:
+    """Progressively truncate the conversation and retry until the brain responds."""
+    total_chars = sum(len(m["content"]) for m in raw_messages)
+    for limit in _TRUNCATION_LIMITS:
+        if total_chars <= limit:
+            continue
+        logger.warning("[%s] Retrying with truncated conversation (%s → %s chars)", request_id, total_chars, limit)
+        truncated_messages = _truncate_messages(raw_messages, limit)
+        truncated_prompt = next((m["content"] for m in reversed(truncated_messages) if m["role"] == "user"), prompt)
+        retry_decision, retry_types = detect(truncated_prompt, truncated_messages)
+        if retry_decision == TriageDecision.ENRICH:
+            content, results = await enrich_and_forward(ctx, truncated_prompt, retry_types, messages=truncated_messages)
+        else:
+            content, results = await forward_to_brain(ctx, truncated_prompt, messages=truncated_messages)
+        if content is not None:
+            return content, results
+    return None, []
+
+
+def _all_providers_unavailable_response(ctx: ProxyContext) -> JSONResponse:
+    """Build a 503 response listing providers currently open in the circuit breaker."""
+    unhealthy = ctx.registry.circuit_breaker.get_unhealthy()
+    msg = "All providers are currently unavailable."
+    if unhealthy:
+        msg += f" Circuit breaker open for: {', '.join(unhealthy)}."
+    msg += " Please check your API keys and try again later."
+    logger.error(msg)
+    return JSONResponse({"error": {"message": msg, "type": "server_error"}}, status_code=503)
+
+
 async def handle_completions(request: Request) -> JSONResponse | StreamingResponse:
     """Handle POST /v1/chat/completions (OpenAI format)."""
     ctx: ProxyContext = request.app.state.ctx
 
     body = await request.body()
-    if len(body) > _MAX_REQUEST_BYTES:
-        return JSONResponse(
-            {"error": {"message": "Request too large", "type": "invalid_request_error"}},
-            status_code=413,
-        )
-    try:
-        body_dict = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return JSONResponse(
-            {"error": {"message": "Invalid JSON in request body", "type": "invalid_request_error"}},
-            status_code=400,
-        )
-
-    try:
-        parsed = OpenAIRequest.model_validate(body_dict)
-    except (ValueError, TypeError):
-        logger.warning("Invalid request format from %s", request.client.host if request.client else "unknown")
-        return JSONResponse(
-            {"error": {"message": "Invalid request format", "type": "invalid_request_error"}},
-            status_code=400,
-        )
+    parsed, body_dict, error = _parse_completions_body(body)
+    if error is not None:
+        return error
+    assert parsed is not None and body_dict is not None  # narrow for type-checker
 
     prompt = extract_prompt(parsed)
-    has_tools = bool(parsed.tools)
-
     if not prompt:
         return JSONResponse(build_response("Empty prompt.", 0))
 
     request_start = time.monotonic()
     request_id = short_id()
+    has_tools = bool(parsed.tools)
     logger.info(
         "[%s] New request: %s messages, prompt=%r%s",
         request_id,
@@ -630,107 +870,26 @@ async def handle_completions(request: Request) -> JSONResponse | StreamingRespon
     )
     logger.debug("[%s] Full prompt: %s", request_id, prompt)
 
-    # Pass original messages to preserve conversation context (including tool fields)
     raw_messages = [{"role": m.role, "content": m.content or ""} for m in parsed.messages]
-
-    # Clean prompt for triage: strip agent-injected XML metadata
     triage_prompt = strip_agent_metadata(prompt)
-    # If cleaned prompt is empty (message was only metadata), skip triage entirely
-    if not triage_prompt:
-        decision, enrichment_types = TriageDecision.TRANSPARENT, []
-    elif ctx.enabled:
-        decision, enrichment_types = detect(triage_prompt, raw_messages)
-    else:
-        decision, enrichment_types = TriageDecision.TRANSPARENT, []
 
-    # Phase 2: LLM classification for prompts that keywords missed
-    if decision == TriageDecision.TRANSPARENT and ctx.enabled and len(triage_prompt.strip()) >= _LLM_DETECT_MIN_CHARS:
-        decision, enrichment_types = await detect_with_llm(triage_prompt, ctx.registry)
-
+    decision, enrichment_types = await _triage_request(ctx, triage_prompt, raw_messages)
     ctx.triage_counts[decision] = ctx.triage_counts.get(decision, 0) + 1
     logger.info("[%s] Detector: %s%s", request_id, decision, f" ({enrichment_types})" if enrichment_types else "")
 
-    # ── Mode Agent: triage + enrichment + anticipation + fake tool_use
     if has_tools:
-        ctx.anticipation_stats["requests_with_tools"] += 1
-
-        # Observe actual tool calls from previous turns (learning feedback loop)
-        if ctx.pattern_learner:
-            actual_tools = extract_actual_tool_calls(body_dict.get("messages", []))
-            if actual_tools:
-                ctx.pattern_learner.observe_outcome(actual_tools, body_dict.get("messages", []))
-
-        # Check if this is a tool_result after a fake we sent → forward to brain
-        has_tool_result = any(m.get("role") == "tool" for m in body_dict.get("messages", []))
-        if has_tool_result and ctx.pending_fakes.pop(request_id, False):
-            logger.info("[%s] Tool results received after fake, forwarding to brain", request_id)
-
-        try:
-            # Enrichment: if triage says ENRICH, run workers in parallel (no brain call —
-            # the brain is the client's own LLM in agent mode)
-            enrichment_task = None
-            if decision == TriageDecision.ENRICH:
-                enrichment_task = asyncio.create_task(
-                    enrich_only(ctx, triage_prompt, enrichment_types, messages=raw_messages)
-                )
-
-            # FAKE tool_use: predict tool calls and return immediately (saves 1 LLM round-trip)
-            if ctx.detector and not has_tool_result:
-                prediction = await ctx.detector.predict(body_dict.get("messages", []), parsed.tools)
-                fake_tools = [
-                    {"tool": t.tool, "input": dict(t.args)}
-                    for t in prediction.tools
-                    if t.confidence >= _FAKE_TOOL_CONFIDENCE
-                ]
-                if fake_tools:
-                    ctx.anticipation_stats["predictions_made"] += 1
-                    logger.info(
-                        "[%s] FAKE tool_use: %s (confidence>=%s)",
-                        request_id,
-                        [t["tool"] for t in fake_tools],
-                        _FAKE_TOOL_CONFIDENCE,
-                    )
-                    # Cancel enrichment if we're faking (it'll be used when tool_results come back)
-                    if enrichment_task:
-                        enrichment_task.cancel()
-                    fake_response = build_fake_openai_tool_response(fake_tools, model=parsed.model)
-                    if parsed.stream:
-                        return StreamingResponse(
-                            iter_sse(response_to_sse_chunks(fake_response, parsed.model)),
-                            media_type="text/event-stream",
-                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                        )
-                    return JSONResponse(fake_response)
-
-            # Inject enrichment results into the request if available
-            if enrichment_task:
-                enrichment_results = await enrichment_task
-                if enrichment_results:
-                    from smartsplit.enrichment import _build_enriched_messages
-
-                    body_dict["messages"] = _build_enriched_messages(raw_messages, prompt, enrichment_results)
-                    logger.info(
-                        "[%s] Enriched agent request with %s worker results", request_id, len(enrichment_results)
-                    )
-
-            raw_response = await ctx.registry.proxy_to_brain(body_dict)
-            elapsed = int((time.monotonic() - request_start) * 1000)
-            logger.info("[%s] Done (agent mode): %sms", request_id, elapsed)
-
-            if parsed.stream:
-                return StreamingResponse(
-                    iter_sse(response_to_sse_chunks(raw_response, parsed.model)),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                )
-
-            return JSONResponse(raw_response)
-        except Exception as e:
-            logger.error("[%s] Agent mode failed: %s", request_id, type(e).__name__)
-            return JSONResponse(
-                {"error": {"message": "Proxy to brain failed, please retry", "type": "server_error"}},
-                status_code=502,
-            )
+        return await _handle_agent_mode(
+            ctx,
+            parsed,
+            body_dict,
+            prompt,
+            raw_messages,
+            triage_prompt,
+            decision,
+            enrichment_types,
+            request_id,
+            request_start,
+        )
 
     if decision == TriageDecision.ENRICH:
         content, results = await enrich_and_forward(ctx, prompt, enrichment_types, messages=raw_messages)
@@ -739,37 +898,11 @@ async def handle_completions(request: Request) -> JSONResponse | StreamingRespon
     else:
         content, results = await forward_to_brain(ctx, prompt, messages=raw_messages)
 
-    # If brain failed, progressively truncate and retry
     if content is None:
-        total_chars = sum(len(m["content"]) for m in raw_messages)
-        for limit in _TRUNCATION_LIMITS:
-            if total_chars <= limit:
-                continue
-            logger.warning("[%s] Retrying with truncated conversation (%s → %s chars)", request_id, total_chars, limit)
-            truncated_messages = _truncate_messages(raw_messages, limit)
-            truncated_prompt = next((m["content"] for m in reversed(truncated_messages) if m["role"] == "user"), prompt)
-            # Re-detect with truncated context (long history may no longer apply)
-            retry_decision, retry_types = detect(truncated_prompt, truncated_messages)
-            if retry_decision == TriageDecision.ENRICH:
-                content, results = await enrich_and_forward(
-                    ctx, truncated_prompt, retry_types, messages=truncated_messages
-                )
-            else:
-                content, results = await forward_to_brain(ctx, truncated_prompt, messages=truncated_messages)
-            if content is not None:
-                break
+        content, results = await _retry_with_truncation(ctx, prompt, raw_messages, request_id)
 
     if content is None:
-        unhealthy = ctx.registry.circuit_breaker.get_unhealthy()
-        msg = "All providers are currently unavailable."
-        if unhealthy:
-            msg += f" Circuit breaker open for: {', '.join(unhealthy)}."
-        msg += " Please check your API keys and try again later."
-        logger.error(msg)
-        return JSONResponse(
-            {"error": {"message": msg, "type": "server_error"}},
-            status_code=503,
-        )
+        return _all_providers_unavailable_response(ctx)
 
     tokens = sum(r.estimated_tokens for r in results)
     prompt_tokens = sum(r.prompt_tokens for r in results)
@@ -993,39 +1126,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         cfg = config if config is not None else load_config()
-
-        http = httpx.AsyncClient(
-            http2=True,
-            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-        )
-        quota = QuotaTracker(provider_configs=cfg.providers)
-        registry = ProviderRegistry(cfg.providers, http, free_llm_priority=cfg.free_llm_priority, brain_name=cfg.brain)
-        planner = Planner(registry)
-        bandit = BanditScorer()
-        router = Router(registry, quota, cfg, bandit=bandit)
-
-        # V3 anticipation components
-        pattern_learner = ToolPatternLearner(project_dir=".")
-        detector = IntentionDetector(registry, pattern_learner=pattern_learner)
-        anticipator = ToolAnticipator(registry, working_dir=".")
-
-        app.state.ctx = ProxyContext(
-            config=cfg,
-            registry=registry,
-            planner=planner,
-            router=router,
-            quota=quota,
-            bandit=bandit,
-            http=http,
-            mode=Mode(mode),
-            detector=detector,
-            anticipator=anticipator,
-            pattern_learner=pattern_learner,
-        )
+        app.state.ctx = build_proxy_context(cfg, Mode(mode))
         logger.info("SmartSplit started (mode=%s, brain=%s, providers=%s)", mode, cfg.brain, len(cfg.providers))
 
-        # Log override status
         if cfg.overrides:
             for task_type, provider_name in cfg.overrides.items():
                 pconfig = cfg.providers.get(provider_name)
@@ -1037,10 +1140,7 @@ def create_app(
         try:
             yield
         finally:
-            quota.flush()
-            bandit.flush()
-            pattern_learner.flush()
-            await http.aclose()
+            await shutdown_proxy_context(app.state.ctx)
             logger.info("SmartSplit stopped")
 
     routes = [

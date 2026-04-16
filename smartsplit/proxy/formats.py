@@ -311,123 +311,151 @@ def anthropic_has_tool_result(body: dict) -> bool:
     return False
 
 
+def _join_text_blocks(blocks: list) -> str:
+    """Concatenate the ``text`` of Anthropic content blocks (tolerate strings and dicts)."""
+    parts: list[str] = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+        elif isinstance(block, str):
+            parts.append(block)
+    return "\n".join(parts)
+
+
+def _anthropic_system_to_openai(system: object) -> dict | None:
+    """Turn the Anthropic ``system`` field (str or list of blocks) into one OpenAI system message."""
+    if isinstance(system, str) and system:
+        return {"role": "system", "content": system}
+    if isinstance(system, list):
+        text = _join_text_blocks(system)
+        if text:
+            return {"role": "system", "content": text}
+    return None
+
+
+def _anthropic_assistant_to_openai(content: object) -> dict:
+    """Convert an Anthropic assistant message (possibly with tool_use blocks) to OpenAI form."""
+    if not isinstance(content, list):
+        return {"role": "assistant", "content": content if isinstance(content, str) else content}
+
+    text_parts: list[str] = []
+    tool_calls: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            tool_calls.append(
+                {
+                    "id": block.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("input", {})),
+                    },
+                    "index": len(tool_calls),
+                }
+            )
+
+    msg: dict = {"role": "assistant", "content": "\n".join(text_parts) if text_parts else None}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    return msg
+
+
+def _extract_tool_result_content(tool_content: object) -> str:
+    """Flatten the ``content`` of a tool_result block (str or list of text blocks)."""
+    if isinstance(tool_content, list):
+        return _join_text_blocks(tool_content)
+    return tool_content if isinstance(tool_content, str) else ""
+
+
+def _anthropic_user_to_openai(content: object) -> list[dict]:
+    """Convert an Anthropic user message to one or more OpenAI messages (handles tool_result)."""
+    if isinstance(content, str):
+        return [{"role": "user", "content": content}]
+    if not isinstance(content, list):
+        return [{"role": "user", "content": content or ""}]
+
+    has_tool_results = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+    if not has_tool_results:
+        return [{"role": "user", "content": _join_text_blocks(content)}]
+
+    # Each tool_result becomes its own tool message; text blocks are emitted as a single user msg.
+    out: list[dict] = []
+    text_parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "tool_result":
+            out.append(
+                {
+                    "role": "tool",
+                    "content": _extract_tool_result_content(block.get("content", "")),
+                    "tool_call_id": block.get("tool_use_id", ""),
+                }
+            )
+        elif btype == "text":
+            text_parts.append(block.get("text", ""))
+    if text_parts:
+        out.append({"role": "user", "content": "\n".join(text_parts)})
+    return out
+
+
+def _anthropic_tools_to_openai(tools: list[dict]) -> list[dict]:
+    """Convert Anthropic tool schemas to OpenAI ``function`` tool schemas."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _anthropic_tool_choice_to_openai(tool_choice: object) -> str | dict | None:
+    """Map Anthropic ``tool_choice`` to OpenAI's ``auto`` / ``required`` / ``function`` form."""
+    if not isinstance(tool_choice, dict):
+        return None
+    tc_type = tool_choice.get("type", "")
+    if tc_type == "auto":
+        return "auto"
+    if tc_type == "any":
+        return "required"
+    if tc_type == "tool":
+        return {"type": "function", "function": {"name": tool_choice.get("name", "")}}
+    return None
+
+
 def anthropic_messages_to_openai(body: dict) -> dict:
     """Convert an Anthropic Messages API request body to OpenAI chat completion format.
 
-    This is the reverse of registry._convert_to_anthropic.
+    This is the reverse of :func:`smartsplit.providers.anthropic_adapter.openai_to_anthropic`.
     """
     openai_messages: list[dict] = []
 
-    # System prompt → system message
-    system = body.get("system")
-    if system:
-        if isinstance(system, str):
-            openai_messages.append({"role": "system", "content": system})
-        elif isinstance(system, list):
-            # Anthropic system can be a list of content blocks
-            text_parts = []
-            for block in system:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-                elif isinstance(block, str):
-                    text_parts.append(block)
-            if text_parts:
-                openai_messages.append({"role": "system", "content": "\n".join(text_parts)})
+    system_msg = _anthropic_system_to_openai(body.get("system"))
+    if system_msg is not None:
+        openai_messages.append(system_msg)
 
     for msg in body.get("messages", []):
         role = msg.get("role", "user")
         content = msg.get("content")
-
         if role == "assistant":
-            # Handle content blocks with tool_use
-            if isinstance(content, list):
-                text_parts = []
-                tool_calls: list[dict] = []
-                tc_index = 0
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type", "")
-                    if btype == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif btype == "tool_use":
-                        tool_calls.append(
-                            {
-                                "id": block.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": block.get("name", ""),
-                                    "arguments": json.dumps(block.get("input", {})),
-                                },
-                                "index": tc_index,
-                            }
-                        )
-                        tc_index += 1
-
-                openai_msg: dict = {"role": "assistant"}
-                openai_msg["content"] = "\n".join(text_parts) if text_parts else None
-                if tool_calls:
-                    openai_msg["tool_calls"] = tool_calls
-                openai_messages.append(openai_msg)
-            elif isinstance(content, str):
-                openai_messages.append({"role": "assistant", "content": content})
-            else:
-                openai_messages.append({"role": "assistant", "content": content})
-
+            openai_messages.append(_anthropic_assistant_to_openai(content))
         elif role == "user":
-            if isinstance(content, list):
-                # Check if it contains tool_result blocks
-                has_tool_results = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
-                if has_tool_results:
-                    # Convert each tool_result to a separate tool message
-                    text_parts = []
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type", "")
-                        if btype == "tool_result":
-                            tool_content = block.get("content", "")
-                            if isinstance(tool_content, list):
-                                # Content can be a list of content blocks
-                                parts = []
-                                for cb in tool_content:
-                                    if isinstance(cb, dict) and cb.get("type") == "text":
-                                        parts.append(cb.get("text", ""))
-                                    elif isinstance(cb, str):
-                                        parts.append(cb)
-                                tool_content = "\n".join(parts)
-                            openai_messages.append(
-                                {
-                                    "role": "tool",
-                                    "content": tool_content,
-                                    "tool_call_id": block.get("tool_use_id", ""),
-                                }
-                            )
-                        elif btype == "text":
-                            text_parts.append(block.get("text", ""))
-                    # If there were also text blocks alongside tool_results, add them
-                    if text_parts:
-                        openai_messages.append({"role": "user", "content": "\n".join(text_parts)})
-                else:
-                    # Regular user message with content blocks (images, text)
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif isinstance(block, str):
-                            text_parts.append(block)
-                    openai_messages.append({"role": "user", "content": "\n".join(text_parts)})
-            elif isinstance(content, str):
-                openai_messages.append({"role": "user", "content": content})
-            else:
-                openai_messages.append({"role": "user", "content": content or ""})
+            openai_messages.extend(_anthropic_user_to_openai(content))
         else:
             openai_messages.append({"role": role, "content": content or ""})
 
-    result: dict = {
-        "model": body.get("model", ""),
-        "messages": openai_messages,
-    }
+    result: dict = {"model": body.get("model", ""), "messages": openai_messages}
     if body.get("max_tokens"):
         result["max_tokens"] = body["max_tokens"]
     if body.get("temperature") is not None:
@@ -435,36 +463,14 @@ def anthropic_messages_to_openai(body: dict) -> dict:
     if body.get("stream") is not None:
         result["stream"] = body["stream"]
 
-    # Convert Anthropic tools → OpenAI tools
     if body.get("tools"):
-        openai_tools: list[dict] = []
-        for tool in body["tools"]:
-            openai_tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.get("name", ""),
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
-                    },
-                }
-            )
+        openai_tools = _anthropic_tools_to_openai(body["tools"])
         if openai_tools:
             result["tools"] = openai_tools
 
-    # Convert tool_choice
-    tool_choice = body.get("tool_choice")
-    if isinstance(tool_choice, dict):
-        tc_type = tool_choice.get("type", "")
-        if tc_type == "auto":
-            result["tool_choice"] = "auto"
-        elif tc_type == "any":
-            result["tool_choice"] = "required"
-        elif tc_type == "tool":
-            result["tool_choice"] = {
-                "type": "function",
-                "function": {"name": tool_choice.get("name", "")},
-            }
+    tool_choice = _anthropic_tool_choice_to_openai(body.get("tool_choice"))
+    if tool_choice is not None:
+        result["tool_choice"] = tool_choice
 
     return result
 

@@ -16,8 +16,9 @@ import logging
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from smartsplit.i18n_keywords import ANALYSIS_KEYWORDS_I18N, COMPARISON_KEYWORDS_I18N
-from smartsplit.planner import _extract_json, detect_domains
+from smartsplit.json_utils import extract_json
+from smartsplit.triage.i18n_keywords import ANALYSIS_KEYWORDS_I18N, COMPARISON_KEYWORDS_I18N
+from smartsplit.triage.planner import detect_domains
 
 if TYPE_CHECKING:
     from smartsplit.providers.registry import ProviderRegistry
@@ -102,7 +103,7 @@ def detect(
     # injected files (IDE context) which don't indicate a long conversation.
     # Strip XML-tagged metadata from char count (agents inject large blocks).
     if msgs:
-        from smartsplit.formats import strip_agent_metadata
+        from smartsplit.proxy.formats import strip_agent_metadata
 
         conversation_msgs = [m for m in msgs if m.get("role") in ("user", "assistant")]
         total_chars = sum(len(strip_agent_metadata(m.get("content", ""))) for m in conversation_msgs)
@@ -185,7 +186,7 @@ async def detect_with_llm(
             _TRIAGE_PROMPT + prompt + "\n--- END PROMPT ---",
             prefer="cerebras",
         )
-        parsed = json.loads(_extract_json(raw))
+        parsed = json.loads(extract_json(raw))
         if not isinstance(parsed, dict):
             return TriageDecision.TRANSPARENT, []
 
