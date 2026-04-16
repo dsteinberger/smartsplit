@@ -39,6 +39,16 @@ make format   # auto-format
 
 All tests must pass before submitting a PR.
 
+## Debug mode
+
+Add `DEBUG=1` before any make command to get verbose logs (provider scores, triage decisions, predictions, worker results):
+
+```bash
+DEBUG=1 make run          # API mode
+DEBUG=1 make proxy        # proxy mode
+DEBUG=1 make docker-up    # Docker
+```
+
 ## Adding a new provider
 
 1. Create `smartsplit/providers/<name>.py` inheriting `LLMProvider` or `SearchProvider`

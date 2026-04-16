@@ -12,8 +12,8 @@
 
 **Why use one LLM when you can use them all?**
 
-Smart routing to the best model for each task — picks the right model tier automatically.<br>
-Free by default. Optimizes paid tokens when available.
+One brain to think, many models to prepare. Each LLM does what it does best.<br>
+Works with any mix of free and paid providers.
 
 [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Providers](#providers) · [Metrics](#metrics)
 
@@ -36,24 +36,25 @@ You ask your coding assistant to write a function, explain an algorithm, transla
 
 **Before SmartSplit:**
 ```
-You: "Write a Python CSV parser, explain the edge cases, and translate the docstrings to French"
+Agent: "Fix the bug in parser.py"
 
-→ Everything goes to one model
-→ Code is okay, explanation is shallow, translation is awkward
+  → Brain: "Let me read parser.py"       (round-trip 1)
+  → Brain: "Now let me grep for errors"   (round-trip 2)
+  → Brain: "Here's the fix"
+  = Brain waited twice before thinking
 ```
 
 **After SmartSplit:**
 ```
-Same prompt, same client, same workflow
+Agent: "Fix the bug in parser.py"
 
-→ Code subtask      → best code model (deep, accurate)
-→ Reasoning subtask → best reasoning model (thorough)
-→ Translation       → language specialist (native quality)
-→ Simple boilerplate → fast cheap model (saves your budget)
-→ Combined into one coherent response
+  → SmartSplit predicts read_file(parser.py) — FAKE tool_use
+  → Agent reads the file itself, instantly
+  → Brain already has the context, responds in one shot
+  = 1 round-trip saved, brain thinks faster
 ```
 
-Same tool. Better answers. No config change.
+Same tool. Faster answers. No config change.
 
 ### What makes SmartSplit different
 
@@ -72,23 +73,6 @@ Everything else                     → Free models first
 ```
 
 No config needed — SmartSplit detects task complexity and chooses the best model tier automatically.
-
-```
-Your coding assistant (Continue, Cline, Aider, Cursor...)
-         |
-    SmartSplit (localhost:8420)
-         |
-    ┌────┼──────────────────────────┐
-    |    |          |                |
-   Code  Search   Translate       Reasoning
-    |    |          |                |
-  Best   Best     Best            Best
-  model  engine   model           model
-    |    |          |                |
-    └────┼──────────┼────────────────┘
-         |
-    Combined response
-```
 
 ---
 
@@ -217,48 +201,72 @@ SmartSplit works with **any tool that supports a custom OpenAI endpoint**: Conti
 
 ## How It Works
 
-Every request is automatically classified into one of two modes:
+```mermaid
+flowchart TD
+    Client["Your coding assistant<br/>(Continue, Cline, Aider, Cursor...)"]
+    Client --> SS(["SmartSplit — localhost:8420"])
+    SS --> A{"tools in request?"}
 
-### RESPOND — route to the best model
+    A -->|"Yes"| PRED["Predict tool calls<br/>(rules + patterns + LLM)"]
+    PRED --> CONF{"confidence ≥ 85%?"}
+    CONF -->|"Yes"| FAKE(["FAKE tool_use<br/>instant response — brain skipped"])
+    CONF -->|"No"| DET
 
-Your prompt is analyzed, split into subtasks if needed, and each one is routed to the best provider:
+    A -->|"No"| DET{"Triage"}
+    DET -->|"TRANSPARENT"| BRAIN(["Brain LLM"])
+    DET -->|"ENRICH"| EN["Workers run in parallel"]
+    EN --> WEB["Web search"]
+    EN --> ANA["Pre-analysis"]
+    EN --> CMP["Multi-perspective"]
+    WEB --> INJ["Inject results into request"]
+    ANA --> INJ
+    CMP --> INJ
+    INJ --> BRAIN
+```
+
+### Agent mode — tools detected
+
+When the request includes `tools` (Claude Code, Cline, Aider...), SmartSplit first tries to **predict** what the brain will ask for. If confidence is high enough (≥ 85%), it responds with a **FAKE tool_use** — the agent executes the reads itself, saving a full round-trip.
+
+Otherwise, the request **continues to triage** — TRANSPARENT or ENRICH — just like API mode. If enrichment is needed (web search, analysis...), the results are injected into the request before forwarding to the brain. Tools are always preserved.
 
 ```
-"Write a Python function to parse CSV and handle errors"
+"Fix the bug in parser.py" (with tools: read_file, grep, edit...)
 
-  [code]       → best code model
-  [reasoning]  → best reasoning model
-  [synthesis]  → combines results
+  [predict]  → confidence 92% → FAKE tool_use(read_file, parser.py)
+  → Agent executes the read itself — brain skipped, 1 round-trip saved
 
-  → One coherent response
+"What's new in Python 3.13?" (with tools: web_search, read_file...)
+
+  [predict]  → confidence 60% → not enough
+  [triage]   → ENRICH
+  [workers]  → web search + summarize
+  [inject]   → enriched context added to request
+  [forward]  → brain LLM with tools preserved
 ```
 
-### ENRICH — search the web first, then route
+### API mode — no tools
 
-When the prompt needs current data, SmartSplit searches the web first:
+Without tools, SmartSplit goes straight to triage: **TRANSPARENT** (forward directly, zero overhead) or **ENRICH** (workers prep context first).
 
 ```
 "What are the new features in Python 3.13?"
 
-  [web_search] → search engine
-  [summarize]  → best summarization model
+  [web_search]        → search engine
+  [pre_analysis]      → reasoning worker
+  [multi_perspective] → comparison worker
 
-  → Response with real, current data
+  → Brain gets enriched context, responds with current data
 ```
-
-### Context-aware
-
-SmartSplit passes your **full conversation history** to the LLM — system prompts, previous messages, everything. For multi-subtask prompts, a context summary is injected into each subtask so no information is lost.
 
 ### Built-in reliability
 
 | Feature | What it does |
 |---------|-------------|
-| **Circuit breaker** | 3 failures in 5 min → provider auto-disabled for 30 min |
+| **Circuit breaker** | 5 failures in 2 min → provider auto-disabled with exponential backoff |
 | **Quality gates** | Detects refusals ("I cannot...") → auto-escalation to next provider |
 | **Fallback chains** | Provider fails → next best one takes over, seamlessly |
-| **Decompose cache** | Repeated prompts skip analysis (LRU, 24h TTL) |
-| **Context preservation** | Full conversation history passed to each LLM |
+| **Pattern learning** | Learns from actual tool calls (Wilson score) → better predictions over time |
 | **Adaptive scoring** | Learns which providers work best from real results (MAB/UCB1) |
 
 ---
@@ -334,7 +342,7 @@ curl http://localhost:8420/metrics
 
 ```json
 {
-  "requests": { "total": 142, "enrich": 42, "respond": 100 },
+  "requests": { "total": 142, "enrich": 42, "transparent": 100 },
   "savings": { "tokens_saved": 45000, "cost_saved_usd": 0.135 },
   "cache": { "hits": 23, "hit_rate": 16.2 },
   "circuit_breaker": { "unhealthy_providers": [] }
@@ -357,6 +365,21 @@ smartsplit --mode economy           # max free usage
 smartsplit --mode quality           # prefer quality over speed
 smartsplit --log-level DEBUG        # verbose logging
 ```
+</details>
+
+<details>
+<summary><b>Debug mode</b></summary>
+
+Add `DEBUG=1` before any make command — works everywhere:
+
+```bash
+DEBUG=1 make run          # API mode, verbose logs
+DEBUG=1 make proxy        # proxy mode, verbose logs
+DEBUG=1 make docker-up    # Docker, verbose logs
+```
+
+Logs provider scores, triage decisions, prediction details, and worker results. Useful for troubleshooting routing or sharing logs with the team.
+
 </details>
 
 <details>
@@ -451,16 +474,24 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```
 smartsplit/
-  proxy.py           HTTP server + LLM-based triage + CLI
-  formats.py         OpenAI format conversion + SSE streaming
-  planner.py         Prompt decomposition + synthesis + LRU cache
-  router.py          Provider scoring + routing + quality gates
-  learning.py        MAB (UCB1) adaptive scoring — learns from real results
-  quota.py           Usage tracking + savings report
-  config.py          Configuration + env vars
-  models.py          Pydantic models + StrEnum
-  exceptions.py      Custom error hierarchy
-  providers/         One file per provider (3 lines for OpenAI-compatible)
+  pipeline.py             Starlette app + SmartSplit pipeline (agent/API modes)
+  proxy.py                HTTPS proxy — TLS interception, CONNECT tunneling
+  intercept.py            Shared interception logic — compression, prediction
+  detector.py             Request triage — TRANSPARENT or ENRICH (keywords + LLM)
+  intention_detector.py   Predicts tool calls (rules + patterns + LLM)
+  tool_anticipator.py     Executes anticipated tools locally (safe reads only)
+  tool_pattern_learner.py Learns from actual tool calls (Wilson score)
+  tool_registry.py        Single source of truth for tool definitions + categories
+  enrichment.py           ENRICH path — workers search, analyze, compare
+  formats.py              OpenAI/Anthropic format conversion + SSE streaming
+  planner.py              Domain detection + prompt decomposition
+  router.py               Provider scoring + routing + quality gates
+  learning.py             MAB (UCB1) adaptive scoring
+  quota.py                Usage tracking + savings report
+  config.py               Configuration + brain auto-detection + env vars
+  models.py               Pydantic models + StrEnum
+  exceptions.py           Custom error hierarchy
+  providers/              One file per provider (3 lines for OpenAI-compatible)
 ```
 
 Adding a new provider is **2 lines** (model is set in config):

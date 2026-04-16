@@ -135,8 +135,10 @@ def detect(
         enrichments.append("pre_analysis")
 
     if enrichments:
+        logger.debug("Triage → ENRICH (reasons: %s, domains: %s)", enrichments, domain_names)
         return TriageDecision.ENRICH, enrichments
 
+    logger.debug("Triage → TRANSPARENT (domains: %s, prompt_len: %d)", domain_names, len(prompt.strip()))
     return TriageDecision.TRANSPARENT, []
 
 
