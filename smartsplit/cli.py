@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 
 def _run_proxy_mode(port: int, host: str, log_level: str, mode: str = "balanced") -> None:
@@ -78,7 +79,12 @@ Proxy mode (Claude Code + subscription):
         choices=["economy", "balanced", "quality"],
         help="Worker routing mode: economy (favor cost), balanced (default), quality (favor quality)",
     )
-    parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
 
     args = parser.parse_args()
 

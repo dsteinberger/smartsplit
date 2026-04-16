@@ -398,6 +398,11 @@ class IntentionDetector:
             return _NULL_PREDICTION
 
         top_confidence = max(t.confidence for t in all_tools)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Merged prediction: %s",
+                [(t.tool, t.args, f"{t.confidence:.2f}", t.reason) for t in all_tools],
+            )
         return Prediction(should_anticipate=True, confidence=top_confidence, tools=all_tools)
 
     async def _predict_from_user(

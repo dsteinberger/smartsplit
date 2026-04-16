@@ -358,6 +358,14 @@ class Router:
 
         candidates.sort(key=lambda c: c[1], reverse=True)
 
+        if candidates and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Scores for [%s] (%s): %s",
+                subtask.type.value,
+                mode,
+                ", ".join(f"{n}={s:.3f}" for n, s in candidates),
+            )
+
         # If override is active, move it to the front
         if override_name:
             candidates = [(n, s) for n, s in candidates if n != override_name]

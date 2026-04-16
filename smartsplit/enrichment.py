@@ -166,6 +166,9 @@ async def enrich_and_forward(
         raw = await asyncio.gather(*(ctx.router.route(st, ctx.mode) for st in worker_subtasks))
         worker_results = [r for r in raw if r.response]
         logger.info("Workers completed: %s/%s succeeded", len(worker_results), len(worker_subtasks))
+        if logger.isEnabledFor(logging.DEBUG):
+            for r in worker_results:
+                logger.debug("Worker [%s] via %s: %s", r.type.value, r.provider, r.response[:200] if r.response else "")
 
     # Build enriched messages and forward to brain
     enriched_messages = _build_enriched_messages(
@@ -245,4 +248,6 @@ async def enrich_only(
     raw = await asyncio.gather(*(ctx.router.route(st, ctx.mode) for st in worker_subtasks))
     worker_results = [r for r in raw if r.response]
     logger.info("Workers completed: %s/%s succeeded", len(worker_results), len(worker_subtasks))
+    for r in worker_results:
+        logger.debug("Worker [%s] via %s: %s", r.type.value, r.provider, r.response[:200] if r.response else "")
     return worker_results

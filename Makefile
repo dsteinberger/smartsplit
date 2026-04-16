@@ -1,5 +1,9 @@
 UV := uv run --extra dev
 
+ifdef DEBUG
+  export LOG_LEVEL=DEBUG
+endif
+
 .PHONY: help install install-proxy test lint format check run proxy setup-claude watch clean env \
         docker-build docker-up docker-down docker-build-proxy docker-up-proxy docker-down-proxy
 
@@ -32,10 +36,10 @@ check: lint ## Lint + format check + tests
 
 # ── Run ──────────────────────────────────────────────────────
 
-run: ## Start SmartSplit server (API mode)
+run: ## Start SmartSplit server (API mode) — DEBUG=1 for verbose
 	uv run python -m smartsplit
 
-proxy: ## Start SmartSplit in HTTPS proxy mode (for Claude Code)
+proxy: ## Start SmartSplit in HTTPS proxy mode — DEBUG=1 for verbose
 	uv run smartsplit --proxy
 
 setup-claude: ## One-time Claude Code setup (generates certs)
@@ -49,7 +53,7 @@ watch: ## Run provider watch locally
 docker-build: ## Build Docker image (API mode)
 	docker build -t smartsplit .
 
-docker-up: ## Start with Docker Compose (API mode)
+docker-up: ## Start with Docker Compose — DEBUG=1 for verbose
 	docker compose up -d
 
 docker-down: ## Stop Docker Compose

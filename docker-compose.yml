@@ -6,6 +6,8 @@ services:
     ports:
       - "8420:8420"
     env_file: .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8420/health').raise_for_status()"]
@@ -23,6 +25,8 @@ services:
     ports:
       - "8420:8420"
     env_file: .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ~/.smartsplit/certs:/certs
     restart: unless-stopped
