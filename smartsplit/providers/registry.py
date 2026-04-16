@@ -345,6 +345,7 @@ _PROVIDER_CLASSES: dict[str, tuple[str, str]] = {
     "openai": ("smartsplit.providers.openai", "OpenAIProvider"),
     "huggingface": ("smartsplit.providers.huggingface", "HuggingFaceProvider"),
     "cloudflare": ("smartsplit.providers.cloudflare", "CloudflareProvider"),
+    "perplexity": ("smartsplit.providers.perplexity", "PerplexityProvider"),
     "serper": ("smartsplit.providers.serper", "SerperProvider"),
     "tavily": ("smartsplit.providers.tavily", "TavilyProvider"),
 }
