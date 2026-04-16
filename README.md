@@ -4,9 +4,6 @@
 
 
 
-> [!WARNING]
-> This project is under active development and not yet stable. APIs may change without notice.
-
 [![CI](https://github.com/dsteinberger/smartsplit/actions/workflows/ci.yml/badge.svg)](https://github.com/dsteinberger/smartsplit/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -15,74 +12,83 @@
 
 **Why use one LLM when you can use them all?**
 
-Your coding agent works alone. SmartSplit gives it a team.<br>
-Multiple LLMs search the web, analyze context, and anticipate what your main model will need — while it focuses on thinking.
-If any provider goes down, another steps in. No tokens wasted, no downtime.
+Smart routing to the best model for each task — picks the right model tier automatically.<br>
+Free by default. Optimizes paid tokens when available.
 
-Most providers offer free tiers — **start without spending a cent.** Add a paid key when you want more power.
-
-[What It Does](#what-smartsplit-does) · [Quick Start](#quick-start) · [Features](#features) · [Providers](#providers)
+[Quick Start](#quick-start) · [How It Works](#how-it-works) · [Providers](#providers) · [Metrics](#metrics)
 
 </div>
 
 ---
 
-## What SmartSplit does
+## Who is this for?
 
-SmartSplit gives your main LLM an entire team. Connect any combination of LLMs — free or paid — and they work in parallel to read files, search the web, analyze context, and prepare everything your brain needs. Your main model receives pre-digested, enriched context and focuses on what it does best: thinking.
+- **Developers without a paid subscription** who want a powerful AI coding assistant using free LLMs.
+- **Developers with a paid API budget** who want to make it last — SmartSplit routes simple tasks to free models and saves your paid tokens (OpenAI, Anthropic) for complex work. No config needed, it's the default behavior.
+- **Teams** who want to combine multiple LLMs without changing their existing tools.
+- **Anyone** frustrated by a single model that's great at code but bad at everything else.
 
-Each LLM has its strengths. SmartSplit knows them and routes the right task to the right worker — code analysis to one, web search to another, translation to a third. The more models you connect, the stronger the team: Gemini's reasoning combined with Groq's speed, Mistral's multilingual skills, or a paid model like GPT-4o for deeper analysis. If one goes down, the next takes over automatically.
+---
 
-On top of that, SmartSplit **saves round-trips** for coding agents. When your agent needs to fix a bug, the LLM typically makes 3-4 back-and-forth calls just to read the right files — each one re-sending the full conversation. SmartSplit predicts those reads and pre-fetches them, so the LLM gets everything in one shot.
+## The problem
 
-The result: **faster responses, lower token usage, real-time data your LLM doesn't have — powered by the combined strengths of every model you connect.**
+You ask your coding assistant to write a function, explain an algorithm, translate a comment, and find the latest docs. It sends **everything to the same model** — and that model is average at most of these tasks.
 
-SmartSplit adapts automatically based on what your client sends:
-
-| Your client sends | SmartSplit does |
-|---|---|
-| A request **with tools** (Claude Code, Cline, Aider...) | Workers predict which files the LLM will need — the agent pre-fetches them, saving round-trips |
-| A request **without tools** (scripts, apps, simple API calls) | Workers search the web, pre-analyze, compare — brain gets enriched context |
-| A simple question | Forwards it directly — zero overhead |
-
-Both paths share the same engine: the same workers, the same fallback logic, the same learning. And the brain's response is **never modified** — what your LLM says goes to you untouched.
-
-<details>
-<summary><b>How does a coding agent actually work? (and why SmartSplit helps)</b></summary>
-
-A coding agent (Claude Code, Cursor, Cline...) works like this:
-
+**Before SmartSplit:**
 ```
-1. You type: "Fix the bug in auth.py"
+You: "Write a Python CSV parser, explain the edge cases, and translate the docstrings to French"
 
-2. The agent sends your message to the LLM (Claude, GPT, Gemini...)
-   along with a list of TOOLS the LLM can use:
-   - Read(path)    — read a file
-   - Write(path)   — write a file
-   - Bash(command)  — run a command
-   - Grep(pattern)  — search in files
-
-3. The LLM responds: "I want to use Read(auth.py)" (a "tool call")
-
-4. The agent executes Read(auth.py) on your machine
-   and sends the file content back to the LLM
-
-5. The LLM reads, thinks, and says: "Now I want Read(config.py)"
-   → another round-trip
-
-6. This loop continues until the LLM has enough context.
-   Each round = a new HTTP request with the FULL conversation history.
+→ Everything goes to one model
+→ Code is okay, explanation is shallow, translation is awkward
 ```
 
-**The cost:** each round-trip re-sends everything — system prompt, all messages, all previous tool results. A 10-turn task sends the same context 10 times. That's a lot of tokens.
+**After SmartSplit:**
+```
+Same prompt, same client, same workflow
 
-**SmartSplit's insight:** most reads are predictable. "Fix auth.py" → the LLM will read `auth.py`. Pytest fails → it will read the failing test file. These patterns repeat across every project, every developer.
+→ Code subtask      → best code model (deep, accurate)
+→ Reasoning subtask → best reasoning model (thorough)
+→ Translation       → language specialist (native quality)
+→ Simple boilerplate → fast cheap model (saves your budget)
+→ Combined into one coherent response
+```
 
-SmartSplit predicts them and pre-executes the reads **before** the LLM asks. The LLM still has all its tools — it can ask for anything. But the obvious reads are already in context, so it can skip straight to the actual work.
+Same tool. Better answers. No config change.
 
-**Fewer round-trips = fewer tokens = lower cost = faster results.**
+### What makes SmartSplit different
 
-</details>
+**Multiply your free tier.** Instead of burning through one provider's quota, SmartSplit spreads requests across all your configured providers — each one contributing its free tier. More providers = more capacity.
+
+**Self-healing.** A provider goes down or hits its rate limit? You won't even notice. SmartSplit detects failures, disables the provider temporarily, and routes to the next best one — automatically.
+
+**Web-aware.** When your prompt needs current data ("latest", "news", "2026"...), SmartSplit detects it and searches the web before answering. No plugin needed — it's built in.
+
+**Stretch your paid tokens.** Got an OpenAI or Anthropic API key? Add it, and SmartSplit picks the right model for each task automatically:
+
+```
+Simple task (boilerplate, summary)  → Haiku / GPT-4o-mini  (cheap)
+Complex task (code, reasoning)      → Sonnet / GPT-4o      (best)
+Everything else                     → Free models first
+```
+
+No config needed — SmartSplit detects task complexity and chooses the best model tier automatically.
+
+```
+Your coding assistant (Continue, Cline, Aider, Cursor...)
+         |
+    SmartSplit (localhost:8420)
+         |
+    ┌────┼──────────────────────────┐
+    |    |          |                |
+   Code  Search   Translate       Reasoning
+    |    |          |                |
+  Best   Best     Best            Best
+  model  engine   model           model
+    |    |          |                |
+    └────┼──────────┼────────────────┘
+         |
+    Combined response
+```
 
 ---
 
@@ -114,52 +120,36 @@ smartsplit
   Mode: balanced
 ```
 
-Verify it's running:
-
-```bash
-curl http://localhost:8420/health
-```
-
 <details>
 <summary><b>Or use Docker</b></summary>
 
 ```bash
-# Create a .env from the template
-cp .env.example .env   # then edit with your API keys
-# or: make env
+# Create a .env file with your API keys
+echo 'GROQ_API_KEY=gsk_...' > .env
 
-# Run with Docker (API mode)
+# Run with Docker
 docker run -p 8420:8420 --env-file .env ghcr.io/dsteinberger/smartsplit
 
 # Or with Docker Compose
 docker compose up -d
-
-# Proxy mode (for HTTPS interception)
-docker compose --profile proxy up -d proxy
 ```
-
-> **Proxy mode** uses `Dockerfile.proxy` — certs are stored in a Docker volume (`certs`). Copy the CA cert from the volume or run `smartsplit setup-claude` locally.
-
 </details>
 
 ### 4. Connect your coding tool
 
-SmartSplit speaks **OpenAI**, **Anthropic**, and **Gemini** formats natively. Any agent that lets you change the API endpoint works.
+<details>
+<summary><b>Continue</b> (VS Code / JetBrains)</summary>
 
-<details open>
-<summary><b>Claude Code</b></summary>
+Copy [`examples/.continuerc.json`](examples/.continuerc.json) to your project as `.continuerc.json`, or add to `~/.continue/config.yaml`:
 
-```bash
-smartsplit setup-claude                  # one-time: generate CA cert
-
-smartsplit --proxy                  # Terminal 1
-NODE_EXTRA_CA_CERTS=~/.smartsplit/certs/ca-cert.pem \
-HTTPS_PROXY=http://localhost:8420 \
-claude                                   # Terminal 2
+```yaml
+models:
+  - name: SmartSplit
+    provider: openai
+    model: smartsplit
+    apiBase: http://localhost:8420/v1
+    apiKey: free
 ```
-
-SmartSplit intercepts requests to `api.anthropic.com`, predicts tool calls, and returns instant responses when confident. Your subscription auth is forwarded untouched — no API key needed. Non-LLM traffic passes through via blind TCP relay.
-
 </details>
 
 <details>
@@ -179,21 +169,6 @@ Copy [`examples/.aider.conf.yml`](examples/.aider.conf.yml) to your project as `
 
 ```bash
 aider --model openai/smartsplit --openai-api-base http://localhost:8420/v1 --openai-api-key free
-```
-</details>
-
-<details>
-<summary><b>Continue</b> (VS Code / JetBrains)</summary>
-
-Copy [`examples/.continuerc.json`](examples/.continuerc.json) to your project as `.continuerc.json`, or add to `~/.continue/config.yaml`:
-
-```yaml
-models:
-  - name: SmartSplit
-    provider: openai
-    model: smartsplit
-    apiBase: http://localhost:8420/v1
-    apiKey: free
 ```
 </details>
 
@@ -236,146 +211,55 @@ client = OpenAI(base_url="http://localhost:8420/v1", api_key="free")
 SmartSplit works with **any tool that supports a custom OpenAI endpoint**: Continue, Cline, Aider, OpenCode, Tabby, Void, Cursor, Open WebUI, Chatbox, LibreChat, Jan, and more.
 </details>
 
-**That's it.** Install, add one API key, connect your tool.
-
-> **Which LLM is the brain?** In proxy mode, your agent's own LLM is the brain (e.g. Claude with your subscription). In API mode, SmartSplit auto-detects the best available brain from your API keys (Claude > GPT > DeepSeek > Groq). Override anytime with `SMARTSPLIT_BRAIN=groq`.
->
-> **Proxy vs API mode:** Proxy mode (`--proxy`) intercepts HTTPS requests transparently — works with any agent that makes HTTPS calls. API mode (default) exposes an OpenAI-compatible endpoint. Both offer the same SmartSplit features.
-
----
-
-## Features
-
-### Core — shared by all modes
-
-| Feature | What it does |
-|---------|-------------|
-| **Brain** | Your main LLM — auto-detected from your API keys (Claude, GPT, DeepSeek...) or set with `SMARTSPLIT_BRAIN`. Stays consistent across the session |
-| **Workers** | All other connected LLMs do the prep work — read files, search the web, analyze context. The more you connect, the stronger the team |
-| **Web search** | Workers search the web via Serper/Tavily — your brain gets real-time data it doesn't have |
-| **Auto-fallback** | Provider down or rate-limited? Next one takes over in milliseconds |
-| **Circuit breaker** | 5 failures in 2 min → exponential backoff (30s → 60s → ... → 30 min). Auto-recovery |
-| **Smart 429 handling** | Enriched request rate-limited? Retry with original body. Upstream 429 propagated (no retry storms) |
-| **Adaptive scoring** | Learns which workers perform best (MAB/UCB1) — routing improves over time |
-| **Quality gates** | Detects refusals ("I cannot...") → auto-escalation to a better provider |
-| **9 languages** | English, French, Spanish, Portuguese, German, Chinese, Japanese, Korean, Russian |
-| **Never modifies the response** | What the brain says goes to you untouched |
-
-### When your client sends tools (agent mode)
-
-When the request contains tools, SmartSplit **predicts** which read-only tools the LLM will call and pre-fetches the results.
-
-| Feature | What it does |
-|---------|-------------|
-| **FAKE tool_use** | Confidence ≥ 0.85 → returns predicted tool calls instantly (0 tokens to the brain, ~5-10s faster) |
-| **3-layer prediction** | Rules (0ms, regex) → Learned patterns (0ms, Wilson score) → Free LLM (~200ms, intent analysis) |
-| **Pattern learning** | Records what the LLM actually calls → predictions improve over time (5 pattern types, staleness decay) |
-| **Tool-Aware Proxy** | Classifies tool results: simple (pass-through), smart (compressible), decisional (never touch) |
-| **Tool passthrough** | All tools preserved — the agent loop works through SmartSplit, invisible to the LLM |
-| **Rate limit protection** | Each FAKE tool_use = ~25K tokens not re-sent = more margin before 429 |
-
-### When your client doesn't send tools (API mode)
-
-When there are no tools, SmartSplit detects whether the request benefits from enrichment.
-
-| Feature | What it does |
-|---------|-------------|
-| **Transparent pass-through** | Simple questions forward directly — zero overhead |
-| **Web enrichment** | "Latest React features?" → real data from the web, not stale training |
-| **Pre-analysis** | Complex prompt → workers break it down so the brain gets structured context |
-| **Comparison** | "Redis vs Memcached?" → multiple perspectives, not a one-sided answer |
+**That's it.** Three steps: install, add one API key, connect your tool. Your assistant now has access to every top free LLM.
 
 ---
 
 ## How It Works
 
+Every request is automatically classified into one of two modes:
+
+### RESPOND — route to the best model
+
+Your prompt is analyzed, split into subtasks if needed, and each one is routed to the best provider:
+
 ```
-                    ┌─────────────────────────────────────┐
-                    │          Your coding tool           │
-                    │  (Claude Code, Cline, Aider, ...)   │
-                    └──────────────┬──────────────────────┘
-                                   │
-                                   ▼
-                         ┌─────────────────┐
-                         │   SmartSplit     │
-                         └────────┬────────┘
-                                  │
-                    ┌─────────────┴─────────────┐
-                    │                           │
-             Has tools?                   No tools?
-                    │                           │
-                    ▼                           │
-     ┌──────────────────────────┐              │
-     │  IN PARALLEL:            │              │
-     │                          │              │
-     │  1. Predict tool calls   │              │
-     │     (rules, patterns,    │              │
-     │      free LLM)           │              │
-     │                          │              │
-     │  2. Detect enrichment    │              │
-     │     (web search,         │              │
-     │      pre-analysis)       │              │
-     └─────────┬────────────────┘              │
-               │                               │
-               ▼                               ▼
-      High confidence              ┌───────────────────┐
-        (≥ 0.85)?                  │  Detect: needs    │
-      ┌────┴────┐                  │  enrichment?      │
-      │         │                  │  (keywords + LLM) │
-    YES        NO                  └─────────┬─────────┘
-      │         │                       ┌────┴────┐
-      ▼         │                       │         │
- FAKE tool_use  │                    ENRICH   TRANSPARENT
- (0 tokens,     │                       │         │
-  agent         │                       ▼         │
-  executes      │                Workers search   │
-  locally)      │                web, pre-analyze  │
-      │         │                       │          │
-      │         └───────┬───────────────┘          │
-      │                 ▼                          │
-      │     Forward to brain                       │
-      │     (+ enrichment if available,            │
-      │      tools preserved)                      │
-      │                 │                          │
-      └────────────┬────┘                          │
-                   ▼                               │
-           Brain responds ◄────────────────────────┘
-                   │
-                   ▼
-          Response forwarded
-          untouched to client
+"Write a Python function to parse CSV and handle errors"
+
+  [code]       → best code model
+  [reasoning]  → best reasoning model
+  [synthesis]  → combines results
+
+  → One coherent response
 ```
 
-### Prediction layers (with tools)
+### ENRICH — search the web first, then route
 
-| Layer | Speed | How | Example |
-|-------|-------|-----|---------|
-| **Rules** | 0ms | Regex: file mentioned in prompt → read it | "fix auth.py" → `read_file(auth.py)` |
-| **Patterns** | 0ms | Learned from past sessions (Wilson score, staleness decay) | "after pytest fails → read the failing test" |
-| **LLM** | ~200ms | Free LLM predicts tool calls | Understands intent, predicts grep/search |
+When the prompt needs current data, SmartSplit searches the web first:
 
-### Enrichment detection
+```
+"What are the new features in Python 3.13?"
 
-| Signal | Action |
-|--------|--------|
-| Web/current data ("latest", "2026", "search"...) | Web search |
-| Complex prompt (> 200 chars, multi-domain) | Pre-analysis |
-| Comparison ("vs", "pros and cons"...) | Multi-perspective |
-| Long conversation (> 10 messages) | Context summary (API mode only) |
-| Simple question, code task | Transparent — zero overhead |
+  [web_search] → search engine
+  [summarize]  → best summarization model
 
-### Brain auto-detection
+  → Response with real, current data
+```
 
-SmartSplit picks the best available LLM as the brain:
+### Context-aware
 
-| Keys configured | Brain | Workers |
-|----------------|-------|---------|
-| + Anthropic key | Claude | All free providers |
-| + OpenAI key | GPT-4o | All free providers |
-| + DeepSeek key | DeepSeek | All free providers |
-| Only free keys | Groq (LLaMA 3.3 70B) | Gemini, Cerebras, Mistral... |
+SmartSplit passes your **full conversation history** to the LLM — system prompts, previous messages, everything. For multi-subtask prompts, a context summary is injected into each subtask so no information is lost.
 
-Override with `SMARTSPLIT_BRAIN=groq`. The brain stays consistent across the session — compatible with agentic tool loops.
+### Built-in reliability
+
+| Feature | What it does |
+|---------|-------------|
+| **Circuit breaker** | 3 failures in 5 min → provider auto-disabled for 30 min |
+| **Quality gates** | Detects refusals ("I cannot...") → auto-escalation to next provider |
+| **Fallback chains** | Provider fails → next best one takes over, seamlessly |
+| **Decompose cache** | Repeated prompts skip analysis (LRU, 24h TTL) |
+| **Context preservation** | Full conversation history passed to each LLM |
+| **Adaptive scoring** | Learns which providers work best from real results (MAB/UCB1) |
 
 ---
 
@@ -385,16 +269,17 @@ Override with `SMARTSPLIT_BRAIN=groq`. The brain stays consistent across the ses
 
 | Provider | Type | Best at |
 |----------|------|---------|
-| **Cerebras** | Free | Reasoning, general (Qwen 3 235B A22B) |
+| **Cerebras** | Free | Reasoning, general (Qwen 3 235B) |
 | **Groq** | Free | Fast inference (LLaMA 3.3 70B) |
-| **Gemini** | Free | Math, factual, reasoning (Gemini 2.5 Flash) |
-| **OpenRouter** | Free | Code (Qwen3 Coder) |
+| **Gemini** | Free | Math, reasoning (Gemini 2.5 Flash) |
+| **OpenRouter** | Free | Code (Qwen3 Coder 480B) |
 | **Mistral** | Free | Translation (Mistral Small) |
 | **HuggingFace** | Free backup | Code (Qwen2.5 Coder 32B) |
 | **Cloudflare** | Free backup | General (LLaMA 3.3 70B) |
 | **DeepSeek** | Paid | Code, reasoning |
+| **Perplexity** | Paid | Web search + factual (Sonar/Sonar Pro) |
 | **Anthropic** | Paid | Complex tasks (Claude) |
-| **OpenAI** | Paid | Complex tasks (o3) |
+| **OpenAI** | Paid | Complex tasks (GPT-4o) |
 | **Serper** | Free | Web search |
 | **Tavily** | Free | Web search |
 
@@ -411,14 +296,14 @@ export HF_TOKEN="hf_..."
 export CLOUDFLARE_API_KEY="..."
 export CLOUDFLARE_ACCOUNT_ID="..."
 export SERPER_API_KEY="..."
-export TAVILY_API_KEY="tvly-..."
+export PERPLEXITY_API_KEY="pplx-..."  # paid — https://console.perplexity.ai/
 ```
 
 More providers = better routing, more fallbacks, higher resilience.
 
-> **Format translation is automatic.** Most providers use the OpenAI format natively. Gemini uses Google's own format — SmartSplit translates on the fly. Your client talks OpenAI or Anthropic, SmartSplit handles the rest.
+> **Format translation is automatic.** Most providers use the OpenAI format natively. Gemini uses Google's own format — SmartSplit translates on the fly. Your client talks OpenAI, SmartSplit handles the rest.
 
-> **Paid providers** (Anthropic, OpenAI) are also supported as optional brains or fallbacks. They're disabled by default.
+> **Paid providers** (Anthropic, OpenAI) are also supported as optional fallbacks. They're disabled by default.
 
 <details>
 <summary><b>Routing table</b></summary>
@@ -449,21 +334,12 @@ curl http://localhost:8420/metrics
 
 ```json
 {
-  "requests": { "total": 142, "transparent": 100, "enrich": 42 },
-  "anticipation": {
-    "requests_with_tools": 89,
-    "predictions_made": 67,
-    "tools_anticipated": 134,
-    "tools_injected": 98,
-    "files_already_read": 12,
-    "pattern_learner": { "total_observations": 203 }
-  },
+  "requests": { "total": 142, "enrich": 42, "respond": 100 },
   "savings": { "tokens_saved": 45000, "cost_saved_usd": 0.135 },
+  "cache": { "hits": 23, "hit_rate": 16.2 },
   "circuit_breaker": { "unhealthy_providers": [] }
 }
 ```
-
-The `anticipation` section tells you exactly what's working: how many predictions were made, how many tools were successfully pre-fetched, and how many were skipped (already read or recently written).
 
 Also available: `GET /health` · `GET /savings`
 
@@ -475,23 +351,12 @@ Also available: `GET /health` · `GET /savings`
 <summary><b>CLI options</b></summary>
 
 ```bash
-# API mode (default) — SmartSplit picks a brain and routes workers
 smartsplit                          # defaults: port 8420, balanced mode
-smartsplit --mode economy           # favor free providers, lower quality gates
-smartsplit --mode balanced          # default — balance quality and cost
-smartsplit --mode quality           # favor quality, stricter quality gates
-
-# Proxy mode — intercepts HTTPS, your agent keeps its own LLM
-smartsplit --proxy                  # HTTPS proxy (balanced routing by default)
-smartsplit --proxy --mode quality   # HTTPS proxy with quality-first routing
-smartsplit setup-claude             # one-time setup helper (generates CA cert)
-
-# Common options
 smartsplit --port 3456              # custom port
+smartsplit --mode economy           # max free usage
+smartsplit --mode quality           # prefer quality over speed
 smartsplit --log-level DEBUG        # verbose logging
 ```
-
-> **Note:** `economy`, `balanced`, and `quality` control how SmartSplit scores and selects workers for enrichment. This applies to both API and proxy modes. In proxy mode, your agent's own LLM stays the brain — only the worker routing is affected.
 </details>
 
 <details>
@@ -535,31 +400,28 @@ You can also tune provider settings and routing:
 <summary><b>Docker</b></summary>
 
 ```bash
-# Create .env from template
-cp .env.example .env   # then edit with your API keys
+# Using the published image
+docker run -p 8420:8420 --env-file .env ghcr.io/dsteinberger/smartsplit
 
-# API mode (default)
+# Or build locally
 docker build -t smartsplit .
 docker run -p 8420:8420 --env-file .env smartsplit
-
-# Proxy mode
-docker build -f Dockerfile.proxy -t smartsplit-proxy .
-docker run -p 8420:8420 --env-file .env -v smartsplit-certs:/certs smartsplit-proxy
 ```
 
-Or use Docker Compose:
+Create a `.env` file with your API keys:
 ```bash
-docker compose up -d                          # API mode
-docker compose --profile proxy up -d proxy    # proxy mode
-```
-
-Or use the published image:
-```bash
-docker run -p 8420:8420 --env-file .env ghcr.io/dsteinberger/smartsplit
+GROQ_API_KEY=gsk_...
+SERPER_API_KEY=...
+GEMINI_API_KEY=AIza...
 ```
 
 > Never commit `.env` to git — it's already in `.gitignore`.
 
+Or use Docker Compose:
+```bash
+docker compose up -d
+```
+See [`docker-compose.yml`](docker-compose.yml) for the full setup.
 </details>
 
 ---
@@ -576,8 +438,6 @@ make install              # or: pip install -e ".[dev]"
 make check                # lint + format check + tests
 make test                 # tests only
 make run                  # start server (requires at least one API key)
-make proxy                # start in HTTPS proxy mode (lightweight, built-in TLS)
-make setup-claude         # one-time Claude Code setup helper (generates CA cert)
 make help                 # all commands
 ```
 
@@ -587,16 +447,29 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
-## Troubleshooting
+## Architecture
 
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| `curl /health` returns nothing | SmartSplit isn't running | Check the terminal for errors. At least one API key is required |
-| `No available provider` in logs | All providers are down or no key configured | Check `curl localhost:8420/health` — add more keys for fallback |
-| `429 Too Many Requests` | Rate limit hit | Normal — SmartSplit auto-retries with the original body. Wait for the window to slide |
-| Proxy mode: `CERTIFICATE_VERIFY_FAILED` | CA cert not trusted | Run `smartsplit setup-claude` and set `NODE_EXTRA_CA_CERTS=~/.smartsplit/certs/ca-cert.pem` |
-| Proxy mode: requests hang | Port conflict or proxy not started | Verify `HTTPS_PROXY=http://localhost:8420` and that SmartSplit is running in proxy mode |
-| `circuit breaker open` for a provider | 5 failures in 2 min → auto-skip | Provider recovers automatically (exponential backoff). Check `/metrics` for details |
+```
+smartsplit/
+  proxy.py           HTTP server + LLM-based triage + CLI
+  formats.py         OpenAI format conversion + SSE streaming
+  planner.py         Prompt decomposition + synthesis + LRU cache
+  router.py          Provider scoring + routing + quality gates
+  learning.py        MAB (UCB1) adaptive scoring — learns from real results
+  quota.py           Usage tracking + savings report
+  config.py          Configuration + env vars
+  models.py          Pydantic models + StrEnum
+  exceptions.py      Custom error hierarchy
+  providers/         One file per provider (3 lines for OpenAI-compatible)
+```
+
+Adding a new provider is **2 lines** (model is set in config):
+
+```python
+class NewProvider(OpenAICompatibleProvider):
+    name = "new"
+    api_url = "https://api.new.com/v1/chat/completions"
+```
 
 ---
 
