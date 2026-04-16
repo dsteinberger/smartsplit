@@ -16,13 +16,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from smartsplit.exceptions import SmartSplitError
-from smartsplit.intention_detector import AnticipatedTool  # noqa: TC001 — re-exported for tests
-from smartsplit.tool_registry import EXECUTABLE_TOOLS, TOOL_ALIAS
+from smartsplit.tools.intention_detector import AnticipatedTool  # noqa: TC001 — re-exported for tests
+from smartsplit.tools.registry import EXECUTABLE_TOOLS, TOOL_ALIAS
 
 if TYPE_CHECKING:
     from smartsplit.providers.registry import ProviderRegistry
@@ -102,55 +103,40 @@ class ToolAnticipator:
                 out.append(result)
         return out
 
+    def _dispatch(self, canonical: str, args: dict) -> Awaitable[str] | None:
+        """Return the coroutine that executes ``canonical`` with ``args``, or ``None`` if unsupported."""
+        if canonical == "read_file":
+            return asyncio.to_thread(self._read_file, args.get("path", args.get("file_path", "")))
+        if canonical == "list_directory":
+            return asyncio.to_thread(self._list_directory, args.get("path", args.get("pattern", ".")))
+        if canonical == "grep":
+            return asyncio.to_thread(
+                self._grep,
+                args.get("pattern", args.get("query", "")),
+                args.get("path"),
+            )
+        if canonical == "web_search":
+            return self._web_search(args.get("query", ""))
+        if canonical == "web_fetch":
+            return self._web_fetch(args.get("url", ""))
+        if canonical.startswith("git_"):
+            return asyncio.to_thread(self._git_command, canonical, args)
+        return None
+
     async def _execute_one(self, tool: str, args: dict) -> ToolResult:
         """Route to the right handler based on tool name."""
-        # Resolve aliases to canonical names
         canonical = self._TOOL_ALIAS.get(tool, tool)
-
+        coro = self._dispatch(canonical, args)
+        if coro is None:
+            return ToolResult(
+                tool=tool,
+                args=args,
+                content="unsupported tool",
+                success=False,
+                tokens_estimate=0,
+            )
         try:
-            if canonical == "read_file":
-                content = await asyncio.wait_for(
-                    asyncio.to_thread(self._read_file, args.get("path", args.get("file_path", ""))),
-                    timeout=_TOOL_TIMEOUT,
-                )
-            elif canonical == "list_directory":
-                content = await asyncio.wait_for(
-                    asyncio.to_thread(self._list_directory, args.get("path", args.get("pattern", "."))),
-                    timeout=_TOOL_TIMEOUT,
-                )
-            elif canonical == "grep":
-                content = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._grep,
-                        args.get("pattern", args.get("query", "")),
-                        args.get("path"),
-                    ),
-                    timeout=_TOOL_TIMEOUT,
-                )
-            elif canonical == "web_search":
-                content = await asyncio.wait_for(
-                    self._web_search(args.get("query", "")),
-                    timeout=_TOOL_TIMEOUT,
-                )
-            elif canonical == "web_fetch":
-                content = await asyncio.wait_for(
-                    self._web_fetch(args.get("url", "")),
-                    timeout=_TOOL_TIMEOUT,
-                )
-            elif canonical.startswith("git_"):
-                content = await asyncio.wait_for(
-                    asyncio.to_thread(self._git_command, canonical, args),
-                    timeout=_TOOL_TIMEOUT,
-                )
-            else:
-                return ToolResult(
-                    tool=tool,
-                    args=args,
-                    content="unsupported tool",
-                    success=False,
-                    tokens_estimate=0,
-                )
-
+            content = await asyncio.wait_for(coro, timeout=_TOOL_TIMEOUT)
             return ToolResult(
                 tool=tool,
                 args=args,

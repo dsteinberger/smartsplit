@@ -26,8 +26,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from smartsplit.tool_registry import FILE_REF_RE as _FILE_PATH_RE
-from smartsplit.tool_registry import WELL_KNOWN_FILES as _WELL_KNOWN_FILES
+from smartsplit.tools.registry import FILE_REF_RE as _FILE_PATH_RE
+from smartsplit.tools.registry import WELL_KNOWN_FILES as _WELL_KNOWN_FILES
 
 logger = logging.getLogger("smartsplit.tool_pattern_learner")
 
@@ -338,35 +338,36 @@ class ToolPatternLearner:
 
     # ── Internal: pattern learning ──────────────────────────
 
-    def _learn_patterns(
-        self,
-        actual_tools: list[dict[str, str]],
-        signals: dict[str, object],
-    ) -> None:
-        """Extract patterns from observed tool calls. Caller must hold self._lock."""
-        now = time.time()
-        file_patterns = _as_dict_of_dicts(self._data, "file_mention_patterns")
-        seq_patterns = _as_dict_of_dicts(self._data, "sequential_patterns")
-        content_patterns = _as_dict_of_dicts(self._data, "result_content_patterns")
-        proj_first = _as_dict_of_dicts(self._data, "project_first_read")
+    @staticmethod
+    def _bump_pattern(bucket: dict, key: str, now: float) -> None:
+        """Increment ``hits`` and refresh ``last_seen`` for ``bucket[key]``."""
+        entry = bucket.get(key, {"hits": 0, "misses": 0, "last_seen": now})
+        entry["hits"] = int(entry.get("hits", 0)) + 1
+        entry["last_seen"] = now
+        bucket[key] = entry
 
-        mentioned_exts = _as_str_list(signals, "mentioned_extensions")
-        is_first: bool = bool(signals.get("is_first_turn", False))
-        error_kws = _as_str_list(signals, "result_error_keywords")
+    @staticmethod
+    def _trim_to_max(bucket: dict, max_entries: int) -> None:
+        """Evict oldest entries (by ``last_seen``) when ``bucket`` exceeds ``max_entries``."""
+        if len(bucket) <= max_entries:
+            return
+        sorted_keys = sorted(bucket, key=lambda k: bucket[k].get("last_seen", 0))
+        for k in sorted_keys[: len(bucket) - max_entries]:
+            del bucket[k]
 
-        # Pattern 1: file mention → tool read
+    def _learn_file_mentions(self, actual_tools: list[dict[str, str]], mentioned_exts: list[str], now: float) -> None:
+        """Pattern 1: mentioned file extension → tool that reads a matching file."""
+        bucket = _as_dict_of_dicts(self._data, "file_mention_patterns")
         for tc in actual_tools:
             abstract = _abstract_tool_call(tc.get("tool", tc.get("name", "")), tc.get("args", {}))
-            # Check if the tool reads a file with an extension the user mentioned
             for ext in mentioned_exts:
                 if "*" + ext in abstract:
-                    key = ext + "→" + abstract
-                    entry = file_patterns.get(key, {"hits": 0, "misses": 0, "last_seen": now})
-                    entry["hits"] = int(entry.get("hits", 0)) + 1
-                    entry["last_seen"] = now
-                    file_patterns[key] = entry
+                    self._bump_pattern(bucket, ext + "→" + abstract, now)
+        self._data["file_mention_patterns"] = bucket
 
-        # Pattern 2: sequential tool calls (A → B)
+    def _learn_sequential(self, actual_tools: list[dict[str, str]], now: float) -> None:
+        """Pattern 2: sequential tool pairs (A → B)."""
+        bucket = _as_dict_of_dicts(self._data, "sequential_patterns")
         for i in range(1, len(actual_tools)):
             prev_abstract = _abstract_tool_call(
                 actual_tools[i - 1].get("tool", actual_tools[i - 1].get("name", "")),
@@ -376,57 +377,60 @@ class ToolPatternLearner:
                 actual_tools[i].get("tool", actual_tools[i].get("name", "")),
                 actual_tools[i].get("args", {}),
             )
-            key = prev_abstract + "→" + curr_abstract
-            entry = seq_patterns.get(key, {"hits": 0, "misses": 0, "last_seen": now})
-            entry["hits"] = int(entry.get("hits", 0)) + 1
-            entry["last_seen"] = now
-            seq_patterns[key] = entry
+            self._bump_pattern(bucket, prev_abstract + "→" + curr_abstract, now)
+        self._trim_to_max(bucket, _MAX_SEQUENTIAL)
+        self._data["sequential_patterns"] = bucket
 
-        # Trim sequential patterns to max
-        if len(seq_patterns) > _MAX_SEQUENTIAL:
-            sorted_keys = sorted(seq_patterns, key=lambda k: seq_patterns[k].get("last_seen", 0))
-            for k in sorted_keys[: len(seq_patterns) - _MAX_SEQUENTIAL]:
-                del seq_patterns[k]
+    def _learn_error_keywords(self, actual_tools: list[dict[str, str]], error_kws: list[str], now: float) -> None:
+        """Pattern 3: error keyword in last result → first tool called next."""
+        if not (error_kws and actual_tools):
+            return
+        bucket = _as_dict_of_dicts(self._data, "result_content_patterns")
+        first_tool = _abstract_tool_call(
+            actual_tools[0].get("tool", actual_tools[0].get("name", "")),
+            actual_tools[0].get("args", {}),
+        )
+        for kw in error_kws:
+            self._bump_pattern(bucket, kw + "→" + first_tool, now)
+        self._trim_to_max(bucket, _MAX_CONTENT)
+        self._data["result_content_patterns"] = bucket
 
-        # Pattern 3: error keywords in result → next tool
-        if error_kws and actual_tools:
-            first_tool = _abstract_tool_call(
-                actual_tools[0].get("tool", actual_tools[0].get("name", "")),
-                actual_tools[0].get("args", {}),
+    def _learn_project_first_read(self, actual_tools: list[dict[str, str]], now: float) -> None:
+        """Pattern 4: the first tools called when opening this project."""
+        if not actual_tools:
+            return
+        proj_first = _as_dict_of_dicts(self._data, "project_first_read")
+        proj_entry = _as_dict_of_dicts(proj_first, self._project_hash)
+        for tc in actual_tools[:3]:
+            abstract = _abstract_tool_call(tc.get("tool", tc.get("name", "")), tc.get("args", {}))
+            normalized = _normalize_tool_call(tc)
+            file_key = normalized or abstract
+            sub_val = proj_entry.get(file_key)
+            sub: dict[str, object] = (
+                sub_val if isinstance(sub_val, dict) else {"hits": 0, "misses": 0, "last_seen": now}
             )
-            for kw in error_kws:
-                key = kw + "→" + first_tool
-                entry = content_patterns.get(key, {"hits": 0, "misses": 0, "last_seen": now})
-                entry["hits"] = int(entry.get("hits", 0)) + 1
-                entry["last_seen"] = now
-                content_patterns[key] = entry
-
-        # Trim content patterns to max
-        if len(content_patterns) > _MAX_CONTENT:
-            sorted_keys = sorted(content_patterns, key=lambda k: content_patterns[k].get("last_seen", 0))
-            for k in sorted_keys[: len(content_patterns) - _MAX_CONTENT]:
-                del content_patterns[k]
-
-        # Pattern 4: project first-read files
-        if is_first and actual_tools:
-            proj_entry = _as_dict_of_dicts(proj_first, self._project_hash)
-            for tc in actual_tools[:3]:  # only first 3 tools
-                abstract = _abstract_tool_call(tc.get("tool", tc.get("name", "")), tc.get("args", {}))
-                normalized = _normalize_tool_call(tc)
-                file_key = normalized or abstract
-                sub_val = proj_entry.get(file_key)
-                sub: dict[str, object] = (
-                    sub_val if isinstance(sub_val, dict) else {"hits": 0, "misses": 0, "last_seen": now}
-                )
-                sub["hits"] = int(sub.get("hits", 0)) + 1
-                sub["last_seen"] = now
-                proj_entry[file_key] = sub
-            proj_first[self._project_hash] = proj_entry
-
-        self._data["file_mention_patterns"] = file_patterns
-        self._data["sequential_patterns"] = seq_patterns
-        self._data["result_content_patterns"] = content_patterns
+            sub["hits"] = int(sub.get("hits", 0)) + 1
+            sub["last_seen"] = now
+            proj_entry[file_key] = sub
+        proj_first[self._project_hash] = proj_entry
         self._data["project_first_read"] = proj_first
+
+    def _learn_patterns(
+        self,
+        actual_tools: list[dict[str, str]],
+        signals: dict[str, object],
+    ) -> None:
+        """Extract patterns from observed tool calls. Caller must hold self._lock."""
+        now = time.time()
+        mentioned_exts = _as_str_list(signals, "mentioned_extensions")
+        is_first = bool(signals.get("is_first_turn", False))
+        error_kws = _as_str_list(signals, "result_error_keywords")
+
+        self._learn_file_mentions(actual_tools, mentioned_exts, now)
+        self._learn_sequential(actual_tools, now)
+        self._learn_error_keywords(actual_tools, error_kws, now)
+        if is_first:
+            self._learn_project_first_read(actual_tools, now)
 
     def _update_accuracy(self, actual_tools: list[dict[str, str]]) -> None:
         """Update per-tool accuracy stats. Caller must hold self._lock."""
@@ -477,40 +481,45 @@ class ToolPatternLearner:
 
     # ── Internal: suggesting ────────────────────────────────
 
-    def _suggest_tools_locked(
+    @staticmethod
+    def _concretize_target(target: str, mentioned_files: list[str]) -> dict[str, str]:
+        """Turn an abstract target like ``*.py`` into concrete args from mentioned files."""
+        if target.startswith("*.") and mentioned_files:
+            target_ext = target[1:]
+            for fpath in mentioned_files:
+                if fpath.endswith(target_ext):
+                    return {"file_path": fpath}
+        return {}
+
+    def _score_and_keep(
         self,
-        messages: list[dict[str, str]],
+        entry: dict[str, object],
+        min_confidence: float,
+    ) -> float | None:
+        """Compute a Wilson score and return it if >= ``min_confidence``, else None."""
+        score = self._pattern_score(int(entry.get("hits", 0)), int(entry.get("misses", 0)))
+        return score if score >= min_confidence else None
+
+    def _suggest_from_file_mentions(
+        self,
+        file_patterns: dict,
+        mentioned_exts: list[str],
+        mentioned_files: list[str],
         min_confidence: float,
     ) -> list[dict[str, str | float]]:
-        """Compute suggestions from all pattern types. Caller must hold self._lock."""
-        signals = _extract_context_signals(messages)
-        suggestions: list[dict[str, str | float]] = []
-
-        mentioned_files = _as_str_list(signals, "mentioned_files")
-        mentioned_exts = _as_str_list(signals, "mentioned_extensions")
-        last_tool: str = str(signals.get("last_tool", ""))
-        last_tool_args = _as_str_dict(signals, "last_tool_args")
-        is_first: bool = bool(signals.get("is_first_turn", False))
-        error_kws = _as_str_list(signals, "result_error_keywords")
-
-        file_patterns = _as_dict_of_dicts(self._data, "file_mention_patterns")
-        seq_patterns = _as_dict_of_dicts(self._data, "sequential_patterns")
-        content_patterns = _as_dict_of_dicts(self._data, "result_content_patterns")
-        proj_first = _as_dict_of_dicts(self._data, "project_first_read")
-
-        # File mention patterns
+        """Suggestions from file-extension mention patterns."""
+        out: list[dict[str, str | float]] = []
         for ext in mentioned_exts:
             for key, entry in file_patterns.items():
                 if not key.startswith(ext + "→"):
                     continue
-                score = self._pattern_score(int(entry.get("hits", 0)), int(entry.get("misses", 0)))
-                if score < min_confidence:
+                score = self._score_and_keep(entry, min_confidence)
+                if score is None:
                     continue
-                # Concretize: find actual files with this extension from context
                 for fpath in mentioned_files:
                     if fpath.endswith(ext):
                         tool_name = key.split("→")[1].split(":")[0] if "→" in key else "read_file"
-                        suggestions.append(
+                        out.append(
                             {
                                 "tool": tool_name,
                                 "args": json.dumps({"file_path": fpath}),
@@ -518,87 +527,127 @@ class ToolPatternLearner:
                                 "source": "file_mention",
                             }
                         )
+        return out
 
-        # Sequential patterns
-        if last_tool:
-            last_abstract = _abstract_tool_call(last_tool, last_tool_args)
-            for key, entry in seq_patterns.items():
-                if not key.startswith(last_abstract + "→"):
-                    continue
-                score = self._pattern_score(int(entry.get("hits", 0)), int(entry.get("misses", 0)))
-                if score < min_confidence:
-                    continue
-                next_part = key.split("→")[1] if "→" in key else ""
-                if not next_part:
-                    continue
-                tool_name = next_part.split(":")[0]
-                # Concretize abstract patterns back to specific files from context
-                target = next_part.split(":")[1] if ":" in next_part else "*"
-                args_dict: dict[str, str] = {}
-                if target.startswith("*.") and mentioned_files:
-                    target_ext = target[1:]  # e.g. ".py"
-                    for fpath in mentioned_files:
-                        if fpath.endswith(target_ext):
-                            args_dict = {"file_path": fpath}
-                            break
-                suggestions.append(
-                    {
-                        "tool": tool_name,
-                        "args": json.dumps(args_dict),
-                        "confidence": score,
-                        "source": "sequential",
-                    }
-                )
+    def _suggest_from_sequential(
+        self,
+        seq_patterns: dict,
+        last_tool: str,
+        last_tool_args: dict[str, str],
+        mentioned_files: list[str],
+        min_confidence: float,
+    ) -> list[dict[str, str | float]]:
+        """Suggestions from sequential-pair patterns (prev → next)."""
+        if not last_tool:
+            return []
+        last_abstract = _abstract_tool_call(last_tool, last_tool_args)
+        out: list[dict[str, str | float]] = []
+        for key, entry in seq_patterns.items():
+            if not key.startswith(last_abstract + "→"):
+                continue
+            score = self._score_and_keep(entry, min_confidence)
+            if score is None:
+                continue
+            next_part = key.split("→")[1] if "→" in key else ""
+            if not next_part:
+                continue
+            tool_name = next_part.split(":")[0]
+            target = next_part.split(":")[1] if ":" in next_part else "*"
+            out.append(
+                {
+                    "tool": tool_name,
+                    "args": json.dumps(self._concretize_target(target, mentioned_files)),
+                    "confidence": score,
+                    "source": "sequential",
+                }
+            )
+        return out
 
-        # Project first-read patterns
-        if is_first:
-            proj_entry = _as_dict_of_dicts(proj_first, self._project_hash)
-            for file_key, entry in proj_entry.items():
-                if not isinstance(entry, dict):
-                    continue
-                score = self._pattern_score(int(entry.get("hits", 0)), int(entry.get("misses", 0)))
-                if score < min_confidence:
-                    continue
-                tool_name = file_key.split(":")[0] if ":" in file_key else "read_file"
-                target = file_key.split(":")[1] if ":" in file_key else ""
-                args_dict = {"file_path": target} if target and target != "*" else {}
-                suggestions.append(
-                    {
-                        "tool": tool_name,
-                        "args": json.dumps(args_dict),
-                        "confidence": score,
-                        "source": "project_first_read",
-                    }
-                )
+    def _suggest_from_project_first_read(self, proj_first: dict, min_confidence: float) -> list[dict[str, str | float]]:
+        """Suggestions from 'first files opened in this project' patterns."""
+        proj_entry = _as_dict_of_dicts(proj_first, self._project_hash)
+        out: list[dict[str, str | float]] = []
+        for file_key, entry in proj_entry.items():
+            if not isinstance(entry, dict):
+                continue
+            score = self._score_and_keep(entry, min_confidence)
+            if score is None:
+                continue
+            tool_name = file_key.split(":")[0] if ":" in file_key else "read_file"
+            target = file_key.split(":")[1] if ":" in file_key else ""
+            args_dict = {"file_path": target} if target and target != "*" else {}
+            out.append(
+                {
+                    "tool": tool_name,
+                    "args": json.dumps(args_dict),
+                    "confidence": score,
+                    "source": "project_first_read",
+                }
+            )
+        return out
 
-        # Result content patterns
+    def _suggest_from_error_keywords(
+        self,
+        content_patterns: dict,
+        error_kws: list[str],
+        mentioned_files: list[str],
+        min_confidence: float,
+    ) -> list[dict[str, str | float]]:
+        """Suggestions from 'error keyword → next tool' patterns."""
+        out: list[dict[str, str | float]] = []
         for kw in error_kws:
             for key, entry in content_patterns.items():
                 if not key.startswith(kw + "→"):
                     continue
-                score = self._pattern_score(int(entry.get("hits", 0)), int(entry.get("misses", 0)))
-                if score < min_confidence:
+                score = self._score_and_keep(entry, min_confidence)
+                if score is None:
                     continue
                 next_part = key.split("→")[1] if "→" in key else ""
                 if not next_part:
                     continue
                 tool_name = next_part.split(":")[0]
                 target = next_part.split(":")[1] if ":" in next_part else "*"
-                args_dict = {}
-                if target.startswith("*.") and mentioned_files:
-                    target_ext = target[1:]
-                    for fpath in mentioned_files:
-                        if fpath.endswith(target_ext):
-                            args_dict = {"file_path": fpath}
-                            break
-                suggestions.append(
+                out.append(
                     {
                         "tool": tool_name,
-                        "args": json.dumps(args_dict),
+                        "args": json.dumps(self._concretize_target(target, mentioned_files)),
                         "confidence": score,
                         "source": "result_content",
                     }
                 )
+        return out
+
+    def _suggest_tools_locked(
+        self,
+        messages: list[dict[str, str]],
+        min_confidence: float,
+    ) -> list[dict[str, str | float]]:
+        """Compute suggestions from all pattern types. Caller must hold self._lock."""
+        signals = _extract_context_signals(messages)
+        mentioned_files = _as_str_list(signals, "mentioned_files")
+        mentioned_exts = _as_str_list(signals, "mentioned_extensions")
+        last_tool = str(signals.get("last_tool", ""))
+        last_tool_args = _as_str_dict(signals, "last_tool_args")
+        is_first = bool(signals.get("is_first_turn", False))
+        error_kws = _as_str_list(signals, "result_error_keywords")
+
+        file_patterns = _as_dict_of_dicts(self._data, "file_mention_patterns")
+        seq_patterns = _as_dict_of_dicts(self._data, "sequential_patterns")
+        content_patterns = _as_dict_of_dicts(self._data, "result_content_patterns")
+        proj_first = _as_dict_of_dicts(self._data, "project_first_read")
+
+        suggestions: list[dict[str, str | float]] = []
+        suggestions.extend(
+            self._suggest_from_file_mentions(file_patterns, mentioned_exts, mentioned_files, min_confidence)
+        )
+        suggestions.extend(
+            self._suggest_from_sequential(seq_patterns, last_tool, last_tool_args, mentioned_files, min_confidence)
+        )
+        if is_first:
+            suggestions.extend(self._suggest_from_project_first_read(proj_first, min_confidence))
+        suggestions.extend(
+            self._suggest_from_error_keywords(content_patterns, error_kws, mentioned_files, min_confidence)
+        )
 
         # Deduplicate by (tool, args), keeping highest confidence
         seen: dict[str, dict[str, str | float]] = {}
@@ -608,7 +657,6 @@ class ToolPatternLearner:
             if existing is None or float(s.get("confidence", 0)) > float(existing.get("confidence", 0)):
                 seen[dedup_key] = s
 
-        # Sort by confidence descending, limit to 3
         result = sorted(seen.values(), key=lambda s: float(s.get("confidence", 0)), reverse=True)
         return result[:3]
 
@@ -681,50 +729,35 @@ class ToolPatternLearner:
                 "tool_accuracy": {},
             }
 
+    @staticmethod
+    def _decay_pattern_bucket(patterns: dict, now: float) -> None:
+        """Remove evicted entries and halve hits on stale ones within a single bucket."""
+        to_delete: list[str] = []
+        for key, entry in patterns.items():
+            if not isinstance(entry, dict):
+                to_delete.append(key)
+                continue
+            last_seen = float(entry.get("last_seen", 0))
+            age = now - last_seen
+            if age > _EVICT_AGE:
+                to_delete.append(key)
+            elif age > _HALF_LIFE:
+                entry["hits"] = max(1, int(entry.get("hits", 0)) // 2)
+        for key in to_delete:
+            del patterns[key]
+
     def _apply_decay(self) -> None:
         """Remove evicted patterns and halve stale ones. Called on load only."""
         now = time.time()
-        pattern_keys = (
-            "file_mention_patterns",
-            "sequential_patterns",
-            "result_content_patterns",
-        )
-
-        for pkey in pattern_keys:
+        for pkey in ("file_mention_patterns", "sequential_patterns", "result_content_patterns"):
             patterns = _as_dict_of_dicts(self._data, pkey)
-            if not isinstance(patterns, dict):
-                continue
-            to_delete: list[str] = []
-            for key, entry in patterns.items():
-                if not isinstance(entry, dict):
-                    to_delete.append(key)
-                    continue
-                last_seen = float(entry.get("last_seen", 0))
-                age = now - last_seen
-                if age > _EVICT_AGE:
-                    to_delete.append(key)
-                elif age > _HALF_LIFE:
-                    entry["hits"] = max(1, int(entry.get("hits", 0)) // 2)
-            for key in to_delete:
-                del patterns[key]
+            if isinstance(patterns, dict):
+                self._decay_pattern_bucket(patterns, now)
 
-        # Also decay project_first_read entries
         proj_first = _as_dict_of_dicts(self._data, "project_first_read")
         if isinstance(proj_first, dict):
             for proj_hash, entries in list(proj_first.items()):
                 if not isinstance(entries, dict):
                     del proj_first[proj_hash]
                     continue
-                to_delete = []
-                for key, entry in entries.items():
-                    if not isinstance(entry, dict):
-                        to_delete.append(key)
-                        continue
-                    last_seen = float(entry.get("last_seen", 0))
-                    age = now - last_seen
-                    if age > _EVICT_AGE:
-                        to_delete.append(key)
-                    elif age > _HALF_LIFE:
-                        entry["hits"] = max(1, int(entry.get("hits", 0)) // 2)
-                for key in to_delete:
-                    del entries[key]
+                self._decay_pattern_bucket(entries, now)

@@ -7,7 +7,7 @@ Usage:
     python scripts/generate_i18n.py --regen fr   # Regenerate French only
 
 Requires: pip install deep-translator  (dev dependency only)
-Output:   smartsplit/i18n_keywords.py
+Output:   smartsplit/triage/i18n_keywords.py
 """
 
 from __future__ import annotations
@@ -325,7 +325,7 @@ def main() -> None:
     parser.add_argument("--regen", metavar="LANG", help="Regenerate a single language")
     args = parser.parse_args()
 
-    output_path = Path(__file__).parent.parent / "smartsplit" / "i18n_keywords.py"
+    output_path = Path(__file__).parent.parent / "smartsplit" / "triage" / "i18n_keywords.py"
 
     # For --add and --regen, load existing data first to preserve other languages
     if args.add or args.regen:

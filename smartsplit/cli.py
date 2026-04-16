@@ -15,14 +15,14 @@ def _run_proxy_mode(port: int, host: str, log_level: str, mode: str = "balanced"
     import os
 
     os.environ["SMARTSPLIT_MODE"] = mode
-    from smartsplit.proxy import start_proxy
+    from smartsplit.proxy.server import start_proxy
 
     start_proxy(port=port, host=host, log_level=log_level)
 
 
 def _setup_claude() -> None:
     """Help the user set up SmartSplit with Claude Code."""
-    from smartsplit.proxy import ensure_certs
+    from smartsplit.proxy.server import ensure_certs
 
     ca_cert_path = ensure_certs()
 
@@ -107,7 +107,7 @@ Proxy mode (Claude Code + subscription):
     # API mode (default)
     import uvicorn
 
-    from smartsplit.pipeline import create_app
+    from smartsplit.proxy.pipeline import create_app
 
     app = create_app(mode=args.mode)
 

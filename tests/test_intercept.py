@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from smartsplit.intercept import (
+from smartsplit.proxy.intercept import (
     build_fake_response,
     build_sse_response,
     compress_tool_result,

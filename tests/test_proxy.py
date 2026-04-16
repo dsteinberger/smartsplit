@@ -7,15 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from smartsplit.anticipation import (
-    extract_actual_tool_calls,
-    extract_already_read_paths,
-    extract_recently_written_paths,
-    inject_anticipated_context,
-)
-from smartsplit.detector import TriageDecision, detect
-from smartsplit.enrichment import _extract_project_context
-from smartsplit.formats import (
+from smartsplit.proxy.formats import (
     OpenAIMessage,
     OpenAIRequest,
     anthropic_has_tools,
@@ -30,7 +22,15 @@ from smartsplit.formats import (
     response_to_sse_chunks,
     stream_chunks,
 )
-from smartsplit.pipeline import create_app
+from smartsplit.proxy.pipeline import create_app
+from smartsplit.tools.anticipation import (
+    extract_actual_tool_calls,
+    extract_already_read_paths,
+    extract_recently_written_paths,
+    inject_anticipated_context,
+)
+from smartsplit.triage.detector import TriageDecision, detect
+from smartsplit.triage.enrichment import _extract_project_context
 
 # ── Format tests ───────────────────────────────────────────────
 

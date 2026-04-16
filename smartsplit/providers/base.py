@@ -78,6 +78,10 @@ class BaseProvider(ABC):
 class LLMProvider(BaseProvider):
     """A provider that generates text from a prompt."""
 
+    # Native wire format for this provider's API. Used to decide whether the brain
+    # can accept an Anthropic-format request as-is or needs translation.
+    native_format: str = "openai"
+
     @abstractmethod
     async def complete(
         self,
@@ -94,6 +98,17 @@ class LLMProvider(BaseProvider):
         If *extra_body* is provided, merge it into the API request body
         (used to pass through tools, tool_choice, etc. from the client).
         """
+
+    async def proxy_openai_request(self, body: dict) -> dict:
+        """Forward an OpenAI-format chat completions body and return an OpenAI-format response.
+
+        Providers with a non-OpenAI native protocol (Anthropic) translate in/out via an
+        adapter. Providers with OpenAI-compatible endpoints override to point at the
+        right URL. Used by the agent-mode proxy to preserve tools/tool_choice.
+
+        Default: raise — concrete providers must opt in by overriding.
+        """
+        raise NotImplementedError(f"Provider {self.name!r} does not support proxy_openai_request")
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -137,6 +152,27 @@ class OpenAICompatibleProvider(LLMProvider):
             raise ProviderError(self.name, "Invalid JSON in API response") from e
         content = self._extract(data, "choices", 0, "message", "content")
         return content, _extract_usage(data)
+
+    async def proxy_openai_request(self, body: dict) -> dict:
+        """Forward an OpenAI-format body to ``self.api_url`` unchanged (beyond model override)."""
+        proxy_body = dict(body)
+        proxy_body["model"] = self.config.model
+        proxy_body.pop("stream", None)
+        try:
+            response = await self.http.post(
+                self.api_url,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=proxy_body,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise ProviderError(self.name, _http_error_message(e)) from e
+        except httpx.TimeoutException as e:
+            raise ProviderError(self.name, "Request timed out") from e
+        try:
+            return response.json()
+        except ValueError as e:
+            raise ProviderError(self.name, "Invalid JSON in API response") from e
 
 
 class SearchProvider(BaseProvider):

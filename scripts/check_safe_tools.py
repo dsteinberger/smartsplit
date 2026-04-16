@@ -233,7 +233,7 @@ def _heuristic_read_only(name: str) -> bool | None:
 def check(our_safe_tools: frozenset[str] | None = None) -> Report:
     """Fetch upstream tools and compare with our SAFE_TOOLS."""
     if our_safe_tools is None:
-        from smartsplit.tool_registry import SAFE_TOOLS
+        from smartsplit.tools.registry import SAFE_TOOLS
 
         our_safe_tools = SAFE_TOOLS
 

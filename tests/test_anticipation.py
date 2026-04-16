@@ -7,13 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from smartsplit.anticipation import (
+from smartsplit.tools.anticipation import (
     _fill_missing_args,
     anticipate_anthropic,
     anticipate_tools,
 )
-from smartsplit.intention_detector import AnticipatedTool, Prediction
-from smartsplit.tool_anticipator import ToolResult
+from smartsplit.tools.anticipator import ToolResult
+from smartsplit.tools.intention_detector import AnticipatedTool, Prediction
 
 # ── Helpers ────────────────────────────────────────────────────
 
@@ -231,8 +231,8 @@ class TestAnticipateAnthropic:
             "messages": [{"role": "user", "content": "hello"}],
         }
         with (
-            patch("smartsplit.formats.anthropic_messages_to_openai", return_value={"messages": body["messages"]}),
-            patch("smartsplit.formats.extract_anthropic_prompt", return_value="hello"),
+            patch("smartsplit.proxy.formats.anthropic_messages_to_openai", return_value={"messages": body["messages"]}),
+            patch("smartsplit.proxy.formats.extract_anthropic_prompt", return_value="hello"),
         ):
             result = await anticipate_anthropic(ctx, "req-1", body)
         assert result == []
@@ -264,8 +264,8 @@ class TestAnticipateAnthropic:
         openai_body = {"messages": [{"role": "user", "content": "read main.py"}]}
 
         with (
-            patch("smartsplit.formats.anthropic_messages_to_openai", return_value=openai_body),
-            patch("smartsplit.formats.extract_anthropic_prompt", return_value="read main.py"),
+            patch("smartsplit.proxy.formats.anthropic_messages_to_openai", return_value=openai_body),
+            patch("smartsplit.proxy.formats.extract_anthropic_prompt", return_value="read main.py"),
         ):
             result = await anticipate_anthropic(ctx, "req-1", body)
 
@@ -281,7 +281,7 @@ class TestAnticipateAnthropic:
         ctx = _make_ctx()
 
         with patch(
-            "smartsplit.formats.anthropic_messages_to_openai",
+            "smartsplit.proxy.formats.anthropic_messages_to_openai",
             side_effect=AttributeError("bad format"),
         ):
             result = await anticipate_anthropic(ctx, "req-1", {"messages": []})
@@ -320,8 +320,8 @@ class TestAnticipateAnthropic:
         openai_body = {"messages": messages_with_read}
 
         with (
-            patch("smartsplit.formats.anthropic_messages_to_openai", return_value=openai_body),
-            patch("smartsplit.formats.extract_anthropic_prompt", return_value="now explain it"),
+            patch("smartsplit.proxy.formats.anthropic_messages_to_openai", return_value=openai_body),
+            patch("smartsplit.proxy.formats.extract_anthropic_prompt", return_value="now explain it"),
         ):
             result = await anticipate_anthropic(ctx, "req-1", {"messages": messages_with_read})
 
@@ -352,8 +352,8 @@ class TestAnticipateAnthropic:
         openai_body = {"messages": body["messages"]}
 
         with (
-            patch("smartsplit.formats.anthropic_messages_to_openai", return_value=openai_body),
-            patch("smartsplit.formats.extract_anthropic_prompt", return_value="read new.py"),
+            patch("smartsplit.proxy.formats.anthropic_messages_to_openai", return_value=openai_body),
+            patch("smartsplit.proxy.formats.extract_anthropic_prompt", return_value="read new.py"),
         ):
             result = await anticipate_anthropic(ctx, "req-1", body)
 
@@ -387,8 +387,8 @@ class TestAnticipateAnthropic:
         openai_body = {"messages": body["messages"]}
 
         with (
-            patch("smartsplit.formats.anthropic_messages_to_openai", return_value=openai_body),
-            patch("smartsplit.formats.extract_anthropic_prompt", return_value="read missing.py"),
+            patch("smartsplit.proxy.formats.anthropic_messages_to_openai", return_value=openai_body),
+            patch("smartsplit.proxy.formats.extract_anthropic_prompt", return_value="read missing.py"),
         ):
             result = await anticipate_anthropic(ctx, "req-1", body)
 
@@ -403,7 +403,7 @@ class TestAnticipateTools:
     async def test_returns_empty_when_detector_is_none(self):
         """Returns empty list when ctx.detector is None."""
         ctx = _make_ctx(detector=None)
-        from smartsplit.formats import OpenAIRequest
+        from smartsplit.proxy.formats import OpenAIRequest
 
         parsed = OpenAIRequest(messages=[{"role": "user", "content": "hello"}])
         result = await anticipate_tools(ctx, "req-1", {}, [], parsed)
@@ -413,7 +413,7 @@ class TestAnticipateTools:
     async def test_returns_empty_when_anticipator_is_none(self):
         """Returns empty list when ctx.anticipator is None."""
         ctx = _make_ctx(anticipator=None)
-        from smartsplit.formats import OpenAIRequest
+        from smartsplit.proxy.formats import OpenAIRequest
 
         parsed = OpenAIRequest(messages=[{"role": "user", "content": "hello"}])
         result = await anticipate_tools(ctx, "req-1", {}, [], parsed)
@@ -424,7 +424,7 @@ class TestAnticipateTools:
         """Returns empty when prediction says not to anticipate."""
         ctx = _make_ctx()
         ctx.detector.predict = AsyncMock(return_value=Prediction(should_anticipate=False, confidence=0.3))
-        from smartsplit.formats import OpenAIRequest
+        from smartsplit.proxy.formats import OpenAIRequest
 
         parsed = OpenAIRequest(
             messages=[{"role": "user", "content": "hello"}],
@@ -458,7 +458,7 @@ class TestAnticipateTools:
             ]
         )
 
-        from smartsplit.formats import OpenAIRequest
+        from smartsplit.proxy.formats import OpenAIRequest
 
         parsed = OpenAIRequest(
             messages=[{"role": "user", "content": "read app.py"}],
@@ -495,7 +495,7 @@ class TestAnticipateTools:
             ]
         )
 
-        from smartsplit.formats import OpenAIRequest
+        from smartsplit.proxy.formats import OpenAIRequest
 
         parsed = OpenAIRequest(
             messages=[{"role": "user", "content": "read x.py"}],
@@ -516,7 +516,7 @@ class TestAnticipateTools:
         ctx = _make_ctx()
         ctx.detector.predict = AsyncMock(return_value=prediction)
 
-        from smartsplit.formats import OpenAIRequest
+        from smartsplit.proxy.formats import OpenAIRequest
 
         messages = [
             {

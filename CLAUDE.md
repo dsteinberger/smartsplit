@@ -28,25 +28,30 @@ Client (no tools) → Detector: TRANSPARENT or ENRICH
 ```
 smartsplit/
   cli.py                  # CLI entry point — argument parsing, mode dispatch
-  proxy.py                # Single-process HTTPS proxy — TLS interception, dynamic certs, CONNECT tunneling
-  pipeline.py             # Starlette app + SmartSplit pipeline (shared between proxy and API mode)
-  intercept.py            # Shared interception logic — compression, prediction, fake response builders
-  tool_registry.py        # Single source of truth for all tool definitions, aliases, categories, regex
-  intention_detector.py   # Predicts read-only tool calls via rules + free LLM (SAFE_TOOLS filter, 0.85 threshold)
-  tool_anticipator.py     # Executes anticipated tools locally (used in API mode only, not proxy mode)
-  tool_pattern_learner.py # Learns from actual tool calls (Wilson score, 5 pattern types, staleness decay)
-  anticipation.py         # Tool anticipation helpers — predict, filter, extract context
-  detector.py             # Request triage — TRANSPARENT or ENRICH decision (keywords + LLM)
-  enrichment.py           # ENRICH path — workers do prep work (web search, analysis), brain synthesizes
-  formats.py              # OpenAI/Anthropic format conversion, SSE streaming, fake tool responses
-  planner.py              # Domain detection (keywords + LLM), prompt decomposition, enrichment subtasks
-  i18n_keywords.py        # Multilingual keywords (generated) — merged into planner + detector at load time
-  router.py               # Worker scoring (Quality + Cost + Availability, additive weighted), routing + quality gates
-  learning.py             # MAB (UCB1) adaptive scoring — auto-calibrates from real results
-  quota.py                # Usage tracking, availability scores, savings report
   config.py               # Pydantic config, brain auto-detection, env var loading, defaults
   models.py               # Pydantic models + StrEnum (TaskType, Mode, Subtask, RouteResult…)
   exceptions.py           # SmartSplitError hierarchy
+  json_utils.py           # Shared JSON helpers (extract_json — strip markdown fences)
+  proxy/
+    server.py             # Single-process HTTPS proxy — TLS interception, dynamic certs, CONNECT tunneling
+    pipeline.py           # Starlette app + SmartSplit pipeline (shared between proxy and API mode)
+    intercept.py          # Shared interception logic — compression, prediction, fake response builders
+    formats.py            # OpenAI/Anthropic format conversion, SSE streaming, fake tool responses
+  tools/
+    registry.py           # Single source of truth for all tool definitions, aliases, categories, regex
+    intention_detector.py # Predicts read-only tool calls via rules + free LLM (SAFE_TOOLS filter, 0.85 threshold)
+    anticipator.py        # Executes anticipated tools locally (used in API mode only, not proxy mode)
+    pattern_learner.py    # Learns from actual tool calls (Wilson score, 5 pattern types, staleness decay)
+    anticipation.py       # Tool anticipation helpers — predict, filter, extract context
+  triage/
+    detector.py           # Request triage — TRANSPARENT or ENRICH decision (keywords + LLM)
+    planner.py            # Domain detection (keywords + LLM), prompt decomposition, enrichment subtasks
+    enrichment.py         # ENRICH path — workers do prep work (web search, analysis), brain synthesizes
+    i18n_keywords.py      # Multilingual keywords (generated) — merged into planner + detector at load time
+  routing/
+    router.py             # Worker scoring (Quality + Cost + Availability, additive weighted), routing + quality gates
+    learning.py           # MAB (UCB1) adaptive scoring — auto-calibrates from real results
+    quota.py              # Usage tracking, availability scores, savings report
   providers/
     base.py              # ABC: LLMProvider, SearchProvider (Strategy pattern)
     registry.py          # Factory + lookup + call_brain + call_free_llm + circuit breaker
@@ -55,7 +60,7 @@ smartsplit/
     anthropic.py / openai.py   # Paid providers (optional)
     serper.py / tavily.py      # Search providers
 scripts/
-  generate_i18n.py   # One-shot script to generate/update i18n_keywords.py via deep-translator
+  generate_i18n.py   # One-shot script to generate/update triage/i18n_keywords.py via deep-translator
 ```
 
 ## Key design decisions
@@ -97,25 +102,25 @@ All tests must pass. No API key needed — tests are fully mocked.
 ## When adding a language
 
 1. Run `python scripts/generate_i18n.py --add <code>` (e.g. `--add hi` for Hindi)
-2. Review the generated translations in `smartsplit/i18n_keywords.py`
+2. Review the generated translations in `smartsplit/triage/i18n_keywords.py`
 3. Fix any bad translations (technical terms often need manual correction)
 4. Add test cases in `tests/test_planner.py` (`test_multilingual_domain_detection`)
 5. Add at least one enrich case in `tests/test_proxy.py` (`_ENRICH_CASES`)
 6. Run `make check`
 
-The i18n system works by merging translated keywords into the existing English keyword lists at module load time. No runtime translation, no extra dependency. English keywords live in `planner.py` and `proxy.py`; translations live in `i18n_keywords.py`.
+The i18n system works by merging translated keywords into the existing English keyword lists at module load time. No runtime translation, no extra dependency. English keywords live in `triage/planner.py` and `triage/detector.py`; translations live in `triage/i18n_keywords.py`.
 
 Currently supported: EN, FR, ES, PT, DE, ZH, JA, KO, RU.
 
 ## When adding a new safe tool
 
-All tool definitions live in `smartsplit/tool_registry.py` — the **single source of truth**. Never add tool names, file path regex, or well-known file lists directly in other files — import from `tool_registry.py`.
+All tool definitions live in `smartsplit/tools/registry.py` — the **single source of truth**. Never add tool names, file path regex, or well-known file lists directly in other files — import from `tools.registry`.
 
-1. Add the canonical handler name to `CANONICAL_HANDLERS` in `tool_registry.py`
-2. Add aliases (agent-specific names) to `TOOL_ALIAS` in `tool_registry.py`
+1. Add the canonical handler name to `CANONICAL_HANDLERS` in `tools/registry.py`
+2. Add aliases (agent-specific names) to `TOOL_ALIAS` in `tools/registry.py`
 3. Add to the right compression category: `DUMB_TOOLS` (small results), `SMART_TOOLS` (large, compress), or leave uncategorized (passthrough)
 4. Add to the right type set if applicable: `READ_TOOLS`, `GREP_TOOLS`, `LIST_DIR_TOOLS`, `SEARCH_TOOLS`
-5. Add an execution handler in `tool_anticipator.py` (in `_execute_one`, match on the canonical name)
+5. Add an execution handler in `tools/anticipator.py` (in `_execute_one`, match on the canonical name)
 6. Respect the security rules: read-only, sandboxed to working_dir, 5-second timeout, catch all errors
 7. Add tests in `tests/test_tool_anticipator.py` — cover success, timeout, path traversal rejection
 8. Run `make check` — the consistency tests in `tests/test_tool_registry.py` will catch any misalignment
@@ -139,8 +144,8 @@ All tool definitions live in `smartsplit/tool_registry.py` — the **single sour
 - Don't add providers without updating the competence table
 - Don't use `str.format()` with user-provided prompts
 - Don't use f-string in logger calls — use `logger.info("text %s", var)` for lazy evaluation
-- Don't define tool names, `WELL_KNOWN_FILES`, or `FILE_REF_RE` outside `tool_registry.py` — import them
+- Don't define tool names, `WELL_KNOWN_FILES`, or `FILE_REF_RE` outside `tools/registry.py` — import them
 - Don't hardcode provider types (free/paid) — always read from config
 - Don't expose API keys in logs or error messages
-- Don't add keywords directly in `planner.py` or `proxy.py` for non-English — use `i18n_keywords.py`
-- Don't edit `i18n_keywords.py` manually — use `scripts/generate_i18n.py` then review
+- Don't add keywords directly in `triage/planner.py` or `triage/detector.py` for non-English — use `triage/i18n_keywords.py`
+- Don't edit `triage/i18n_keywords.py` manually — use `scripts/generate_i18n.py` then review

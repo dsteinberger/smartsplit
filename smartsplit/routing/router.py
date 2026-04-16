@@ -26,13 +26,13 @@ from smartsplit.models import (
     TokenUsage,
 )
 from smartsplit.providers.base import SearchProvider
-from smartsplit.quota import estimate_tokens
+from smartsplit.routing.quota import estimate_tokens
 
 if TYPE_CHECKING:
     from smartsplit.config import ProviderConfig, SmartSplitConfig
-    from smartsplit.learning import BanditScorer
     from smartsplit.providers.registry import ProviderRegistry
-    from smartsplit.quota import QuotaTracker
+    from smartsplit.routing.learning import BanditScorer
+    from smartsplit.routing.quota import QuotaTracker
 
 logger = logging.getLogger("smartsplit.router")
 
@@ -322,26 +322,21 @@ class Router:
         except Exception:
             return False
 
-    async def route(self, subtask: Subtask, mode: Mode | None = None) -> RouteResult:
-        """Find the best provider for *subtask* and execute the call."""
-        mode = mode or self._config.mode
-        is_search = subtask.type == TaskType.WEB_SEARCH
-        use_quality_gate = mode in _QUALITY_GATE_MODES
-        tokens_est = estimate_tokens(subtask.content)
-        escalations: list[EscalationRecord] = []
+    def _resolve_override(self, subtask_type: str) -> str | None:
+        """Return an override provider name if it's configured and healthy, else ``None``."""
+        name = self._config.overrides.get(subtask_type)
+        if not name:
+            return None
+        if self._registry.get(name) is None:
+            logger.warning("Override %s → %s ignored — provider not configured", subtask_type, name)
+            return None
+        if not self._registry.circuit_breaker.is_healthy(name):
+            logger.warning("Override %s → %s skipped — circuit breaker open", subtask_type, name)
+            return None
+        return name
 
-        # Check user override for this task type
-        override_name = self._config.overrides.get(subtask.type.value)
-        if override_name:
-            override_provider = self._registry.get(override_name)
-            if override_provider is None:
-                logger.warning("Override %s → %s ignored — provider not configured", subtask.type.value, override_name)
-                override_name = None
-            elif not self._registry.circuit_breaker.is_healthy(override_name):
-                logger.warning("Override %s → %s skipped — circuit breaker open", subtask.type.value, override_name)
-                override_name = None
-
-        # Build scored candidate list
+    def _build_candidates(self, subtask: Subtask, mode: Mode, is_search: bool) -> list[tuple[str, float]]:
+        """Score every healthy provider compatible with ``subtask`` and sort descending."""
         candidates: list[tuple[str, float]] = []
         for name, provider in self._registry.get_all().items():
             if is_search and not isinstance(provider, SearchProvider):
@@ -351,12 +346,22 @@ class Router:
             if not self._registry.circuit_breaker.is_healthy(name):
                 logger.info("Skipping %s — circuit breaker open", name)
                 continue
-
             pconfig = self._config.providers.get(name)
             ptype = pconfig.type if pconfig else ProviderType.FREE
             candidates.append((name, self.score(name, ptype, subtask, mode)))
-
         candidates.sort(key=lambda c: c[1], reverse=True)
+        return candidates
+
+    async def route(self, subtask: Subtask, mode: Mode | None = None) -> RouteResult:
+        """Find the best provider for *subtask* and execute the call."""
+        mode = mode or self._config.mode
+        is_search = subtask.type == TaskType.WEB_SEARCH
+        use_quality_gate = mode in _QUALITY_GATE_MODES
+        tokens_est = estimate_tokens(subtask.content)
+        escalations: list[EscalationRecord] = []
+
+        override_name = self._resolve_override(subtask.type.value)
+        candidates = self._build_candidates(subtask, mode, is_search)
 
         if candidates and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -366,7 +371,6 @@ class Router:
                 ", ".join(f"{n}={s:.3f}" for n, s in candidates),
             )
 
-        # If override is active, move it to the front
         if override_name:
             candidates = [(n, s) for n, s in candidates if n != override_name]
             candidates.insert(0, (override_name, 10.0))

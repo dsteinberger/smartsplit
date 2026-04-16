@@ -12,7 +12,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from smartsplit.anticipation import _SEARCH_QUERY_PROMPT, _extract_project_context
+from smartsplit.json_utils import extract_json
 from smartsplit.models import (
     Complexity,
     RouteResult,
@@ -20,12 +20,39 @@ from smartsplit.models import (
     TaskType,
     TerminationState,
 )
-from smartsplit.planner import _extract_json
+from smartsplit.tools.anticipation import _SEARCH_QUERY_PROMPT, _extract_project_context
 
 if TYPE_CHECKING:
-    from smartsplit.pipeline import ProxyContext
+    from smartsplit.proxy.pipeline import ProxyContext
 
 logger = logging.getLogger("smartsplit.enrichment")
+
+
+async def _extract_search_query(
+    ctx: ProxyContext,
+    prompt: str,
+    messages: list[dict[str, str]] | None,
+    *,
+    store_on_ctx: bool = False,
+) -> str:
+    """Refine ``prompt`` into a concise Google-ready query via free LLM, else return it unchanged."""
+    try:
+        context = _extract_project_context(messages or [])
+        raw_queries = await ctx.registry.call_free_llm(
+            _SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", prompt),
+            prefer="cerebras",
+        )
+        parsed = json.loads(extract_json(raw_queries))
+        if isinstance(parsed, list) and parsed:
+            search_prompt = " ".join(str(q) for q in parsed[:3])
+            if store_on_ctx:
+                # Expose the refined query for FAKE tool_use fallback when Serper fails.
+                ctx._last_search_query = search_prompt
+            logger.info("Search query extracted: %r", search_prompt)
+            return search_prompt
+    except Exception as e:
+        logger.debug("Search query extraction failed: %s, using raw prompt", type(e).__name__)
+    return prompt
 
 
 _ENRICHMENT_PROMPTS: dict[str, str] = {
@@ -142,21 +169,7 @@ async def enrich_and_forward(
     """ENRICH path — workers do prep work, then brain synthesizes."""
     logger.info("ENRICH (%s) → workers, then brain: %s", enrichment_types, ctx.registry.brain_name)
 
-    # For web_search, extract a good search query via LLM instead of raw prompt
-    search_prompt = prompt
-    if "web_search" in enrichment_types:
-        try:
-            context = _extract_project_context(messages or [])
-            raw_queries = await ctx.registry.call_free_llm(
-                _SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", prompt),
-                prefer="cerebras",
-            )
-            parsed = json.loads(_extract_json(raw_queries))
-            if isinstance(parsed, list) and parsed:
-                search_prompt = " ".join(str(q) for q in parsed[:3])
-                logger.info("Search query extracted: %r", search_prompt)
-        except Exception as e:
-            logger.debug("Search query extraction failed: %s, using raw prompt", type(e).__name__)
+    search_prompt = await _extract_search_query(ctx, prompt, messages) if "web_search" in enrichment_types else prompt
 
     # Build and execute worker subtasks
     worker_subtasks = _build_enrichment_subtasks(search_prompt, enrichment_types, messages)
@@ -223,22 +236,11 @@ async def enrich_only(
     """
     logger.info("ENRICH workers only (%s)", enrichment_types)
 
-    search_prompt = prompt
-    if "web_search" in enrichment_types:
-        try:
-            context = _extract_project_context(messages or [])
-            raw_queries = await ctx.registry.call_free_llm(
-                _SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", prompt),
-                prefer="cerebras",
-            )
-            parsed = json.loads(_extract_json(raw_queries))
-            if isinstance(parsed, list) and parsed:
-                search_prompt = " ".join(str(q) for q in parsed[:3])
-                # Store for FAKE tool_use fallback if Serper fails
-                ctx._last_search_query = search_prompt
-                logger.info("Search query extracted: %r", search_prompt)
-        except Exception:
-            pass
+    search_prompt = (
+        await _extract_search_query(ctx, prompt, messages, store_on_ctx=True)
+        if "web_search" in enrichment_types
+        else prompt
+    )
 
     worker_subtasks = _build_enrichment_subtasks(search_prompt, enrichment_types, messages)
 

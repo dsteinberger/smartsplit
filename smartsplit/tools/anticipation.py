@@ -12,31 +12,31 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from smartsplit.intention_detector import AnticipatedTool
-from smartsplit.planner import _extract_json
-from smartsplit.tool_pattern_learner import _extract_context_signals
-from smartsplit.tool_registry import (
+from smartsplit.json_utils import extract_json
+from smartsplit.tools.intention_detector import AnticipatedTool
+from smartsplit.tools.pattern_learner import _extract_context_signals
+from smartsplit.tools.registry import (
     FILE_REF_RE as _FILE_REF_RE,
 )
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     GREP_TOOLS as _GREP_TOOLS,
 )
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     LIST_DIR_TOOLS as _LIST_DIR_TOOLS,
 )
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     READ_TOOLS as _READ_TOOLS,
 )
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     SEARCH_TOOLS as _SEARCH_TOOLS,
 )
-from smartsplit.tool_registry import (
+from smartsplit.tools.registry import (
     WRITE_TOOLS as _WRITE_TOOLS,
 )
 
 if TYPE_CHECKING:
-    from smartsplit.formats import OpenAIRequest
-    from smartsplit.pipeline import ProxyContext
+    from smartsplit.proxy.formats import OpenAIRequest
+    from smartsplit.proxy.pipeline import ProxyContext
 
 logger = logging.getLogger("smartsplit.anticipation")
 
@@ -63,6 +63,44 @@ def _extract_project_context(messages: list[dict]) -> str:
     return ""
 
 
+def _fill_read_args(t: AnticipatedTool, mentioned_files: list[str], request_id: str) -> list[AnticipatedTool]:
+    """Expand a read-tool prediction with one entry per mentioned file (up to 3)."""
+    if not mentioned_files:
+        logger.debug("[%s] Skipping %s: no path in args and no files in prompt", request_id, t.tool)
+        return []
+    base = dict(t.args)
+    return [
+        AnticipatedTool(tool=t.tool, args={**base, "path": path}, reason=t.reason, confidence=t.confidence)
+        for path in mentioned_files[:3]
+    ]
+
+
+async def _fill_search_args(
+    ctx: ProxyContext,
+    t: AnticipatedTool,
+    user_prompt: str,
+    messages: list[dict],
+    request_id: str,
+) -> AnticipatedTool:
+    """Extract a structured search query via free LLM, falling back to the raw prompt."""
+    args = dict(t.args)
+    query = user_prompt[:200]
+    try:
+        context = _extract_project_context(messages)
+        raw = await ctx.registry.call_free_llm(
+            _SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", user_prompt[:500]),
+            prefer="cerebras",
+        )
+        parsed_q = json.loads(extract_json(raw))
+        if isinstance(parsed_q, list) and parsed_q:
+            query = " ".join(str(q) for q in parsed_q[:3])
+            logger.info("[%s] Extracted search query: %r", request_id, query)
+    except Exception:
+        logger.debug("[%s] Search query extraction failed, using raw prompt", request_id)
+    args["query"] = query
+    return AnticipatedTool(tool=t.tool, args=args, reason=t.reason, confidence=t.confidence)
+
+
 async def _fill_missing_args(
     ctx: ProxyContext,
     request_id: str,
@@ -75,51 +113,25 @@ async def _fill_missing_args(
     The free LLM predictor often predicts the tool type but omits args.
     We extract plausible args from the user prompt and context.
     """
-
-    # Extract file paths mentioned in the user prompt
     mentioned_files = list(dict.fromkeys(_FILE_REF_RE.findall(user_prompt)))
+    result: list[AnticipatedTool] = []
 
-    result = []
     for t in predictions:
-        args = dict(t.args)
+        if t.tool in _READ_TOOLS and not t.args.get("path"):
+            result.extend(_fill_read_args(t, mentioned_files, request_id))
+            continue
 
-        if t.tool in _READ_TOOLS and not args.get("path"):
-            if mentioned_files:
-                # Create one prediction per mentioned file
-                for path in mentioned_files[:3]:
-                    result.append(
-                        AnticipatedTool(
-                            tool=t.tool, args={**args, "path": path}, reason=t.reason, confidence=t.confidence
-                        )
-                    )
-                continue
-            else:
-                logger.debug("[%s] Skipping %s: no path in args and no files in prompt", request_id, t.tool)
-                continue
+        if t.tool in _SEARCH_TOOLS and not t.args.get("query"):
+            result.append(await _fill_search_args(ctx, t, user_prompt, messages, request_id))
+            continue
 
-        elif t.tool in _LIST_DIR_TOOLS and not args.get("path"):
-            args["path"] = "."
-
-        elif t.tool in _SEARCH_TOOLS and not args.get("query"):
-            query = user_prompt[:200]
-            try:
-                context = _extract_project_context(messages)
-                raw = await ctx.registry.call_free_llm(
-                    _SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", user_prompt[:500]),
-                    prefer="cerebras",
-                )
-                parsed_q = json.loads(_extract_json(raw))
-                if isinstance(parsed_q, list) and parsed_q:
-                    query = " ".join(str(q) for q in parsed_q[:3])
-                    logger.info("[%s] Extracted search query: %r", request_id, query)
-            except Exception:
-                logger.debug("[%s] Search query extraction failed, using raw prompt", request_id)
-            args["query"] = query
-
-        elif t.tool in _GREP_TOOLS and not args.get("pattern"):
+        if t.tool in _GREP_TOOLS and not t.args.get("pattern"):
             logger.debug("[%s] Skipping %s: no pattern in args", request_id, t.tool)
             continue
 
+        args = dict(t.args)
+        if t.tool in _LIST_DIR_TOOLS and not args.get("path"):
+            args["path"] = "."
         result.append(AnticipatedTool(tool=t.tool, args=args, reason=t.reason, confidence=t.confidence))
 
     return result
@@ -258,8 +270,8 @@ def inject_anticipated_context(
     return enriched
 
 
-def extract_already_read_paths(messages: list[dict]) -> set[str]:
-    """Extract file paths already read in the conversation (no need to pre-fetch again)."""
+def _extract_paths_for_tools(messages: list[dict], tool_filter: frozenset[str]) -> set[str]:
+    """Collect the ``path`` arguments of assistant tool_calls whose name is in ``tool_filter``."""
     paths: set[str] = set()
     for msg in messages:
         if msg.get("role") != "assistant":
@@ -272,7 +284,7 @@ def extract_already_read_paths(messages: list[dict]) -> set[str]:
                 continue
             func = tc.get("function", {})
             name = func.get("name", "") if isinstance(func, dict) else ""
-            if name not in _READ_TOOLS:
+            if name not in tool_filter:
                 continue
             args_raw = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
             try:
@@ -283,33 +295,16 @@ def extract_already_read_paths(messages: list[dict]) -> set[str]:
             if path:
                 paths.add(path)
     return paths
+
+
+def extract_already_read_paths(messages: list[dict]) -> set[str]:
+    """Extract file paths already read in the conversation (no need to pre-fetch again)."""
+    return _extract_paths_for_tools(messages, _READ_TOOLS)
 
 
 def extract_recently_written_paths(messages: list[dict]) -> set[str]:
     """Extract file paths that were written/edited recently in the conversation."""
-    paths: set[str] = set()
-    for msg in messages:
-        if msg.get("role") != "assistant":
-            continue
-        tool_calls = msg.get("tool_calls")
-        if not isinstance(tool_calls, list):
-            continue
-        for tc in tool_calls:
-            if not isinstance(tc, dict):
-                continue
-            func = tc.get("function", {})
-            name = func.get("name", "") if isinstance(func, dict) else ""
-            if name not in _WRITE_TOOLS:
-                continue
-            args_raw = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
-            try:
-                args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-            path = args.get("path") or args.get("file_path") or args.get("filename", "")
-            if path:
-                paths.add(path)
-    return paths
+    return _extract_paths_for_tools(messages, _WRITE_TOOLS)
 
 
 def extract_actual_tool_calls(messages: list[dict]) -> list[dict]:
@@ -351,7 +346,7 @@ async def anticipate_anthropic(
 
     Converts to OpenAI format, then delegates to the shared pipeline.
     """
-    from smartsplit.formats import anthropic_messages_to_openai, extract_anthropic_prompt
+    from smartsplit.proxy.formats import anthropic_messages_to_openai, extract_anthropic_prompt
 
     if not ctx.detector or not ctx.anticipator:
         return []

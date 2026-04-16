@@ -14,13 +14,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import time
 from collections import OrderedDict
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from smartsplit.exceptions import SmartSplitError
+from smartsplit.json_utils import extract_json
 from smartsplit.models import Complexity, Mode, RouteResult, Subtask, TaskType
 
 if TYPE_CHECKING:
@@ -255,7 +255,7 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
 }
 
 # Merge multilingual keywords into domain lists (deduplicated).
-from smartsplit.i18n_keywords import DOMAIN_KEYWORDS_I18N as _I18N  # noqa: E402
+from smartsplit.triage.i18n_keywords import DOMAIN_KEYWORDS_I18N as _I18N  # noqa: E402
 
 for _lang_keywords in _I18N.values():
     for _domain, _keywords in _lang_keywords.items():
@@ -359,13 +359,6 @@ Respond with ONLY the summary sentence, no other text.
 Prompt: """
 
 
-def _extract_json(text: str) -> str:
-    """Strip markdown code fences that LLMs frequently wrap around JSON."""
-    text = text.strip()
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-    return match.group(1).strip() if match else text
-
-
 _CACHE_MAX_SIZE = 1000
 _CACHE_TTL_SECONDS = 86400  # 24 hours
 
@@ -428,7 +421,7 @@ class Planner:
                 _CLASSIFY_PROMPT + prompt + "\n--- END PROMPT ---",
                 prefer="groq",
             )
-            parsed = json.loads(_extract_json(raw))
+            parsed = json.loads(extract_json(raw))
             if not isinstance(parsed, list):
                 raise ValueError("LLM returned non-list")
             # Filter to valid domains only
@@ -444,6 +437,62 @@ class Planner:
         keyword_domains = detect_domains(prompt)
         return [d for d, _ in keyword_domains]
 
+    @staticmethod
+    def _single_task(
+        prompt: str,
+        domains: list[str] | None,
+        complexity: Complexity,
+        messages: list[dict[str, str]] | None,
+    ) -> list[Subtask]:
+        """Build a single-subtask result using the first domain as task type."""
+        task_type = TaskType.GENERAL
+        if domains:
+            task_type = _DOMAIN_TO_TASK_TYPE.get(domains[0], TaskType.GENERAL)
+        return [Subtask(type=task_type, content=prompt, complexity=complexity, messages=messages)]
+
+    async def _decompose_multi_domain(
+        self,
+        prompt: str,
+        domain_names: list[str],
+        max_subtasks: int,
+        messages: list[dict[str, str]] | None,
+    ) -> list[Subtask]:
+        """Call the planner LLM, validate+trim the subtasks, and inject shared context."""
+        decompose_prompt = (
+            _DECOMPOSE_PREFIX
+            + ", ".join(domain_names)
+            + _DECOMPOSE_SUFFIX
+            + str(max_subtasks)
+            + _DECOMPOSE_RULES
+            + prompt
+            + "\n--- END USER PROMPT ---"
+        )
+
+        raw = await self._registry.call_free_llm(decompose_prompt, prefer="groq")
+        parsed = json.loads(extract_json(raw))
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+
+        subtasks = [Subtask.model_validate(s) for s in parsed]
+        if messages:
+            for st in subtasks:
+                st.messages = [dict(m) for m in messages]
+
+        if len(subtasks) > max_subtasks:
+            logger.warning("Truncating %s subtasks to %s", len(subtasks), max_subtasks)
+            subtasks = subtasks[:max_subtasks]
+            for st in subtasks:
+                if st.depends_on is not None and st.depends_on >= len(subtasks):
+                    st.depends_on = None
+
+        if len(subtasks) == 1:
+            logger.info("Planner returned 1 subtask — no decomposition needed")
+        else:
+            logger.info("Decomposed into %s subtasks: %s", len(subtasks), [s.type for s in subtasks])
+            subtasks = await self._inject_context(prompt, subtasks, messages=messages)
+
+        return subtasks
+
     async def decompose(
         self,
         prompt: str,
@@ -458,28 +507,23 @@ class Planner:
         - Multi-domain prompts are split along domain boundaries.
         - Falls back to a single task if the planner LLM fails.
         """
-        # Cache lookup (includes message hash to distinguish conversations)
         key = _cache_key(prompt, mode, messages)
         cached = self.cache.get(key)
         if cached is not None:
-            # Re-inject messages into all cached subtasks (messages is exclude=True, not serialized)
             if messages:
                 for st in cached:
                     st.messages = [dict(m) for m in messages]
             logger.info("Cache hit — returning %s cached subtask(s)", len(cached))
             return cached
 
-        # Quick path: very short prompts skip decomposition but still use domains
+        # Short prompt: skip decomposition
         if len(prompt.strip()) < _SIMPLE_PROMPT_THRESHOLD:
-            task_type = TaskType.GENERAL
-            if domains:
-                task_type = _DOMAIN_TO_TASK_TYPE.get(domains[0], TaskType.GENERAL)
-            logger.info("Prompt is short — skipping decomposition (type=%s)", task_type.value)
-            result = [Subtask(type=task_type, content=prompt, complexity=Complexity.LOW, messages=messages)]
+            result = self._single_task(prompt, domains, Complexity.LOW, messages)
+            logger.info("Prompt is short — skipping decomposition (type=%s)", result[0].type.value)
             self.cache.put(key, result)
             return result
 
-        # Step 1: Use domains from triage if available, otherwise classify
+        # Determine domains (from triage or via LLM classification)
         if domains:
             domain_names = domains
             logger.info("Using triage domains: %s", domain_names)
@@ -487,62 +531,19 @@ class Planner:
             domain_names = await self.classify_domains(prompt)
             logger.info("Detected domains: %s", domain_names)
 
-        # Step 2: Single domain or no clear domain → route direct, no decomposition
+        # Single domain: route direct
         if len(domain_names) <= 1:
-            task_type = TaskType.GENERAL
-            if domain_names:
-                task_type = _DOMAIN_TO_TASK_TYPE.get(domain_names[0], TaskType.GENERAL)
+            result = self._single_task(prompt, domain_names, Complexity.MEDIUM, messages)
             logger.info("Single domain '%s' — routing direct", domain_names[0] if domain_names else "general")
-            result = [Subtask(type=task_type, content=prompt, complexity=Complexity.MEDIUM, messages=messages)]
             self.cache.put(key, result)
             return result
 
-        # Step 3: Multi-domain → decompose via LLM
+        # Multi-domain: decompose via LLM (with graceful fallback)
         max_subtasks = MAX_SUBTASKS.get(mode, MAX_SUBTASKS[Mode.BALANCED])
-
         try:
-            decompose_prompt = (
-                _DECOMPOSE_PREFIX
-                + ", ".join(domain_names)
-                + _DECOMPOSE_SUFFIX
-                + str(max_subtasks)
-                + _DECOMPOSE_RULES
-                + prompt
-                + "\n--- END USER PROMPT ---"
-            )
-
-            raw = await self._registry.call_free_llm(decompose_prompt, prefer="groq")
-            parsed = json.loads(_extract_json(raw))
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-
-            subtasks = [Subtask.model_validate(s) for s in parsed]
-            # Attach conversation messages to each subtask (deep copy to avoid shared state)
-            if messages:
-                for st in subtasks:
-                    st.messages = [dict(m) for m in messages]
-
-            # Enforce max subtask limit
-            if len(subtasks) > max_subtasks:
-                logger.warning("Truncating %s subtasks to %s (mode=%s)", len(subtasks), max_subtasks, mode.value)
-                subtasks = subtasks[:max_subtasks]
-                # Invalidate depends_on references to truncated subtasks
-                for st in subtasks:
-                    if st.depends_on is not None and st.depends_on >= len(subtasks):
-                        st.depends_on = None
-
-            # If planner returned a single subtask, no decomposition needed
-            if len(subtasks) == 1:
-                logger.info("Planner returned 1 subtask — no decomposition needed")
-            else:
-                logger.info("Decomposed into %s subtasks: %s", len(subtasks), [s.type for s in subtasks])
-
-                # Step 4: Inject shared context into each subtask
-                subtasks = await self._inject_context(prompt, subtasks, messages=messages)
-
+            subtasks = await self._decompose_multi_domain(prompt, domain_names, max_subtasks, messages)
             self.cache.put(key, subtasks)
             return subtasks
-
         except (SmartSplitError, json.JSONDecodeError, ValueError, KeyError) as e:
             logger.warning("Planner decomposition failed, single-task fallback: %s", type(e).__name__)
             result = [Subtask(content=prompt, messages=messages)]
@@ -557,40 +558,46 @@ class Planner:
     ) -> list[Subtask]:
         """Generate a context summary and prepend it to each subtask's content."""
         try:
-            # Include conversation history in context summary if available
-            if messages and len(messages) > 1:
-                conversation = "\n".join(f"[{m['role']}]: {m['content'][:200]}" for m in messages)
-                context_input = f"Conversation:\n{conversation}\n\nLatest prompt: {original_prompt}"
-            else:
-                context_input = original_prompt
-            context_summary = await self._registry.call_free_llm(
-                _CONTEXT_SUMMARY_TEMPLATE + context_input,
-                prefer="groq",
-            )
-            context_summary = context_summary.strip()
-            if not context_summary:
-                logger.warning("Context injection skipped: empty summary from LLM")
-                return subtasks
-            if len(context_summary) > 500:
-                logger.warning("Context injection skipped: summary too long (%s chars)", len(context_summary))
-                return subtasks
-
-            enriched = []
-            for st in subtasks:
-                enriched.append(
-                    Subtask(
-                        type=st.type,
-                        content=f"[Context: {context_summary}]\n\n{st.content}",
-                        complexity=st.complexity,
-                        depends_on=st.depends_on,
-                        messages=st.messages,
-                    )
-                )
-            logger.info("Injected context summary (%s chars) into %s subtasks", len(context_summary), len(subtasks))
-            return enriched
+            context_summary = await self._generate_context_summary(original_prompt, messages)
         except (SmartSplitError, ValueError) as e:
             logger.error("Context injection FAILED — subtasks will lack context: %s", type(e).__name__)
             return subtasks
+
+        if context_summary is None:
+            return subtasks
+
+        enriched = [
+            Subtask(
+                type=st.type,
+                content=f"[Context: {context_summary}]\n\n{st.content}",
+                complexity=st.complexity,
+                depends_on=st.depends_on,
+                messages=st.messages,
+            )
+            for st in subtasks
+        ]
+        logger.info("Injected context summary (%s chars) into %s subtasks", len(context_summary), len(subtasks))
+        return enriched
+
+    async def _generate_context_summary(
+        self, original_prompt: str, messages: list[dict[str, str]] | None
+    ) -> str | None:
+        """Call the free LLM for a shared context summary, or ``None`` if it's unusable."""
+        if messages and len(messages) > 1:
+            conversation = "\n".join(f"[{m['role']}]: {m['content'][:200]}" for m in messages)
+            context_input = f"Conversation:\n{conversation}\n\nLatest prompt: {original_prompt}"
+        else:
+            context_input = original_prompt
+
+        raw = await self._registry.call_free_llm(_CONTEXT_SUMMARY_TEMPLATE + context_input, prefer="groq")
+        summary = raw.strip()
+        if not summary:
+            logger.warning("Context injection skipped: empty summary from LLM")
+            return None
+        if len(summary) > 500:
+            logger.warning("Context injection skipped: summary too long (%s chars)", len(summary))
+            return None
+        return summary
 
     async def synthesize(self, original_prompt: str, results: list[RouteResult]) -> str:
         """Combine subtask results into one coherent response."""

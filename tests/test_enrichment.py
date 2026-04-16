@@ -7,12 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from smartsplit.enrichment import (
-    _build_enriched_messages,
-    _build_enrichment_subtasks,
-    enrich_and_forward,
-)
-from smartsplit.formats import anthropic_has_tool_named
 from smartsplit.models import (
     Complexity,
     Mode,
@@ -20,6 +14,12 @@ from smartsplit.models import (
     TaskType,
     TerminationState,
     TokenUsage,
+)
+from smartsplit.proxy.formats import anthropic_has_tool_named
+from smartsplit.triage.enrichment import (
+    _build_enriched_messages,
+    _build_enrichment_subtasks,
+    enrich_and_forward,
 )
 
 # ── _build_enrichment_subtasks ──────────────────────────────────
@@ -299,8 +299,8 @@ class TestWebSearchCascade:
     @pytest.mark.asyncio
     async def test_web_search_skipped_no_provider_no_agent_tool(self):
         """web_search enrichment removed when no search provider AND no agent tool."""
-        from smartsplit.detector import TriageDecision
-        from smartsplit.pipeline import process_anthropic_request_lite
+        from smartsplit.proxy.pipeline import process_anthropic_request_lite
+        from smartsplit.triage.detector import TriageDecision
 
         ctx = _make_pipeline_ctx(has_search_provider=False)
 
@@ -313,7 +313,7 @@ class TestWebSearchCascade:
         }
 
         # Force detect to return ENRICH with web_search
-        with patch("smartsplit.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])):
+        with patch("smartsplit.proxy.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])):
             result = await process_anthropic_request_lite(ctx, body, {})
 
         # web_search was the only enrichment type, and it was removed → TRANSPARENT
@@ -322,8 +322,8 @@ class TestWebSearchCascade:
     @pytest.mark.asyncio
     async def test_cascade_serper_fails_returns_fake_tool_use(self):
         """When web_search enrichment fails but agent has the tool, return FAKE tool_use."""
-        from smartsplit.detector import TriageDecision
-        from smartsplit.pipeline import process_anthropic_request_lite
+        from smartsplit.proxy.pipeline import process_anthropic_request_lite
+        from smartsplit.triage.detector import TriageDecision
 
         ctx = _make_pipeline_ctx(has_search_provider=True)
         # Set the extracted search query
@@ -343,8 +343,8 @@ class TestWebSearchCascade:
         empty_results: list[RouteResult] = []
 
         with (
-            patch("smartsplit.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])),
-            patch("smartsplit.pipeline.enrich_only", AsyncMock(return_value=empty_results)),
+            patch("smartsplit.proxy.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])),
+            patch("smartsplit.proxy.pipeline.enrich_only", AsyncMock(return_value=empty_results)),
         ):
             result = await process_anthropic_request_lite(ctx, body, {})
 
@@ -360,8 +360,8 @@ class TestWebSearchCascade:
     @pytest.mark.asyncio
     async def test_cascade_uses_WebSearch_name_when_available(self):
         """Cascade picks 'WebSearch' tool name when that's what the agent has."""
-        from smartsplit.detector import TriageDecision
-        from smartsplit.pipeline import process_anthropic_request_lite
+        from smartsplit.proxy.pipeline import process_anthropic_request_lite
+        from smartsplit.triage.detector import TriageDecision
 
         ctx = _make_pipeline_ctx(has_search_provider=True)
         ctx._last_search_query = "test query"
@@ -374,8 +374,8 @@ class TestWebSearchCascade:
         }
 
         with (
-            patch("smartsplit.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])),
-            patch("smartsplit.pipeline.enrich_only", AsyncMock(return_value=[])),
+            patch("smartsplit.proxy.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])),
+            patch("smartsplit.proxy.pipeline.enrich_only", AsyncMock(return_value=[])),
         ):
             result = await process_anthropic_request_lite(ctx, body, {})
 
@@ -390,7 +390,7 @@ class TestEnrichmentBackoff:
     @pytest.mark.asyncio
     async def test_enrichment_skipped_during_backoff(self):
         """Enrichment is skipped when enrichment_skip_until is in the future."""
-        from smartsplit.pipeline import process_anthropic_request_lite
+        from smartsplit.proxy.pipeline import process_anthropic_request_lite
 
         ctx = _make_pipeline_ctx(enrichment_skip_until=time.time() + 300)
 
@@ -401,7 +401,7 @@ class TestEnrichmentBackoff:
         }
 
         # Even if detect would say ENRICH, it should be skipped due to backoff
-        with patch("smartsplit.pipeline.detect") as mock_detect:
+        with patch("smartsplit.proxy.pipeline.detect") as mock_detect:
             result = await process_anthropic_request_lite(ctx, body, {})
 
         # detect should never be called — the enrichment block is skipped entirely
@@ -411,8 +411,8 @@ class TestEnrichmentBackoff:
     @pytest.mark.asyncio
     async def test_enrichment_runs_after_backoff_expires(self):
         """Enrichment runs normally when enrichment_skip_until is in the past."""
-        from smartsplit.detector import TriageDecision
-        from smartsplit.pipeline import process_anthropic_request_lite
+        from smartsplit.proxy.pipeline import process_anthropic_request_lite
+        from smartsplit.triage.detector import TriageDecision
 
         ctx = _make_pipeline_ctx(
             enrichment_skip_until=time.time() - 10,  # expired 10s ago
@@ -433,8 +433,8 @@ class TestEnrichmentBackoff:
         )
 
         with (
-            patch("smartsplit.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])),
-            patch("smartsplit.pipeline.enrich_only", AsyncMock(return_value=[web_result])),
+            patch("smartsplit.proxy.pipeline.detect", return_value=(TriageDecision.ENRICH, ["web_search"])),
+            patch("smartsplit.proxy.pipeline.enrich_only", AsyncMock(return_value=[web_result])),
         ):
             result = await process_anthropic_request_lite(ctx, body, {})
 

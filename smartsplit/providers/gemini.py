@@ -9,6 +9,7 @@ from smartsplit.models import TokenUsage
 from smartsplit.providers.base import _EMPTY_USAGE, LLMProvider, _http_error_message
 
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+_GEMINI_OPENAI_COMPAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
 
 class GeminiProvider(LLMProvider):
@@ -91,3 +92,24 @@ class GeminiProvider(LLMProvider):
             usage = _EMPTY_USAGE
 
         return content, usage
+
+    async def proxy_openai_request(self, body: dict) -> dict:
+        """Forward via Gemini's OpenAI-compatible endpoint (needed for tool use passthrough)."""
+        proxy_body = dict(body)
+        proxy_body["model"] = self.config.model
+        proxy_body.pop("stream", None)
+        try:
+            response = await self.http.post(
+                _GEMINI_OPENAI_COMPAT_URL,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=proxy_body,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise ProviderError(self.name, _http_error_message(e)) from e
+        except httpx.TimeoutException as e:
+            raise ProviderError(self.name, "Request timed out") from e
+        try:
+            return response.json()
+        except ValueError as e:
+            raise ProviderError(self.name, "Invalid JSON in API response") from e

@@ -10,7 +10,7 @@ import pytest
 from smartsplit.config import ProviderConfig, SmartSplitConfig
 from smartsplit.models import Mode, ProviderType
 from smartsplit.providers.registry import ProviderRegistry
-from smartsplit.quota import QuotaTracker
+from smartsplit.routing.quota import QuotaTracker
 
 # ── Config fixtures ──────────────────────────────────────────
 

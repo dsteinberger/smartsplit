@@ -81,8 +81,9 @@ No config needed — SmartSplit detects task complexity and chooses the best mod
 ### 1. Install
 
 ```bash
-pip install smartsplit
-# or: uv pip install smartsplit
+pip install smartsplit            # API mode (Continue, Cline, Aider...)
+# or
+pip install smartsplit[proxy]     # HTTPS proxy mode (Claude Code)
 ```
 
 ### 2. Get a free API key (2 minutes)
@@ -120,6 +121,24 @@ docker compose up -d
 </details>
 
 ### 4. Connect your coding tool
+
+<details open>
+<summary><b>Claude Code</b> (Terminal)</summary>
+
+Claude Code connects via HTTPS proxy — SmartSplit intercepts requests transparently.
+
+```bash
+# Terminal 1: start the proxy (generates certs on first run)
+smartsplit --proxy
+
+# Terminal 2: launch Claude Code through SmartSplit
+NODE_EXTRA_CA_CERTS=~/.smartsplit/certs/ca-cert.pem \
+HTTPS_PROXY=http://localhost:8420 \
+claude
+```
+
+That's it — Claude Code's tool calls are now anticipated by SmartSplit, saving round-trips automatically.
+</details>
 
 <details>
 <summary><b>Continue</b> (VS Code / JetBrains)</summary>
@@ -192,7 +211,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8420/v1", api_key="free")
 ```
 
-SmartSplit works with **any tool that supports a custom OpenAI endpoint**: Continue, Cline, Aider, OpenCode, Tabby, Void, Cursor, Open WebUI, Chatbox, LibreChat, Jan, and more.
+SmartSplit works with **Claude Code** (via HTTPS proxy) and **any tool that supports a custom OpenAI endpoint**: Continue, Cline, Aider, OpenCode, Tabby, Void, Cursor, Open WebUI, Chatbox, LibreChat, Jan, and more.
 </details>
 
 **That's it.** Three steps: install, add one API key, connect your tool. Your assistant now has access to every top free LLM.
@@ -203,7 +222,7 @@ SmartSplit works with **any tool that supports a custom OpenAI endpoint**: Conti
 
 ```mermaid
 flowchart TD
-    Client["Your coding assistant<br/>(Continue, Cline, Aider, Cursor...)"]
+    Client["Your coding assistant<br/>(Claude Code, Continue, Cline, Aider...)"]
     Client --> SS(["SmartSplit — localhost:8420"])
     SS --> A{"tools in request?"}
 

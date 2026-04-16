@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from smartsplit.intention_detector import (
+from smartsplit.tools.intention_detector import (
     _NULL_PREDICTION,
     AnticipatedTool,
     IntentionDetector,

@@ -9,7 +9,7 @@ import pytest
 
 from smartsplit.config import SmartSplitConfig
 from smartsplit.models import TaskType
-from smartsplit.pipeline import (
+from smartsplit.proxy.pipeline import (
     PipelineResult,
     ProxyContext,
     _AnthropicPassthroughError,

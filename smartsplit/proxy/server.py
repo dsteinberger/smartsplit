@@ -24,15 +24,23 @@ import logging
 import os
 import ssl
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import httpx
+from smartsplit.exceptions import SmartSplitError
 
 if TYPE_CHECKING:
-    from smartsplit.pipeline import ProxyContext
+    from smartsplit.proxy.pipeline import ProxyContext
 
 logger = logging.getLogger("smartsplit.proxy_server")
+
+# Hard limits on the transport layer to protect against DoS (huge Content-Length,
+# oversized chunks, header floods) before the pipeline's higher-level caps kick in.
+_MAX_REQUEST_BYTES = 1_000_000  # 1 MB — aligned with pipeline._MAX_REQUEST_BYTES
+_MAX_CHUNK_SIZE = 10_000_000  # 10 MB per HTTP/1.1 chunk (generous for streamed SSE)
+_MAX_HEADER_COUNT = 100  # request/response header lines
+_MAX_RESPONSE_BYTES = 50_000_000  # 50 MB for a single non-chunked response body
 
 _CERT_DIR = Path(os.environ.get("SMARTSPLIT_CERT_DIR", str(Path.home() / ".smartsplit" / "certs")))
 _CA_CERT = _CERT_DIR / "ca-cert.pem"
@@ -153,21 +161,45 @@ def ensure_certs() -> Path:
 
 
 async def _read_http_request(reader: asyncio.StreamReader) -> tuple[str, dict[str, str], bytes]:
-    """Read a full HTTP/1.1 request."""
+    """Read a full HTTP/1.1 request, enforcing transport-level size limits."""
     request_line = (await reader.readline()).decode("utf-8", errors="replace").strip()
     headers: dict[str, str] = {}
+    header_count = 0
     while True:
         line = (await reader.readline()).decode("utf-8", errors="replace").strip()
         if not line:
             break
+        header_count += 1
+        if header_count > _MAX_HEADER_COUNT:
+            raise SmartSplitError(f"Request header count exceeds limit ({_MAX_HEADER_COUNT})")
         if ":" in line:
             key, value = line.split(":", 1)
             headers[key.strip().lower()] = value.strip()
     body = b""
-    content_length = int(headers.get("content-length", "0"))
+    try:
+        content_length = int(headers.get("content-length", "0"))
+    except ValueError as exc:
+        raise SmartSplitError(f"Invalid Content-Length header: {exc}") from None
+    if content_length < 0 or content_length > _MAX_REQUEST_BYTES:
+        raise SmartSplitError(f"Content-Length {content_length} exceeds limit ({_MAX_REQUEST_BYTES})")
     if content_length > 0:
         body = await reader.readexactly(content_length)
     return request_line, headers, body
+
+
+def _parse_chunk_size(line: bytes) -> int:
+    """Parse an HTTP/1.1 chunk-size line, rejecting values over _MAX_CHUNK_SIZE."""
+    raw = line.strip()
+    # Strip chunk extensions (`; name=value`) before parsing.
+    if b";" in raw:
+        raw = raw.split(b";", 1)[0].strip()
+    try:
+        size = int(raw, 16)
+    except ValueError:
+        raise SmartSplitError(f"Invalid chunk size: {line!r}") from None
+    if size < 0 or size > _MAX_CHUNK_SIZE:
+        raise SmartSplitError(f"Chunk size {size} exceeds limit ({_MAX_CHUNK_SIZE})")
+    return size
 
 
 def _build_http_response(status: int, headers: dict[str, str], body: bytes) -> bytes:
@@ -247,17 +279,25 @@ def _log_sse_usage(chunk_data: bytes) -> None:
         pass
 
 
+def _iter_headers(header_text: str) -> Iterator[tuple[str, str]]:
+    """Yield ``(name_lower, value)`` for each header line in raw HTTP header text."""
+    for line in header_text.split("\r\n"):
+        if ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        yield name.strip().lower(), value.strip()
+
+
 def _log_ratelimit_summary(header_text: str) -> None:
     """Log Anthropic rate limit as a single concise line."""
     util_5h = util_7d = status = ""
-    for hline in header_text.split("\r\n"):
-        lower = hline.lower()
-        if "5h-utilization:" in lower:
-            util_5h = hline.split(":", 1)[1].strip()
-        elif "7d-utilization:" in lower:
-            util_7d = hline.split(":", 1)[1].strip()
-        elif lower.startswith("anthropic-ratelimit-unified-status:"):
-            status = hline.split(":", 1)[1].strip()
+    for name, value in _iter_headers(header_text):
+        if "5h-utilization" in name:
+            util_5h = value
+        elif "7d-utilization" in name:
+            util_7d = value
+        elif name == "anthropic-ratelimit-unified-status":
+            status = value
     if util_5h:
         logger.info("RATELIMIT: 5h=%s | 7d=%s | status=%s", util_5h, util_7d, status)
 
@@ -278,11 +318,10 @@ def _parse_transfer_info(header_text: str) -> tuple[int, bool]:
     """Parse content-length and chunked flag from header text."""
     content_length = 0
     is_chunked = False
-    for hline in header_text.split("\r\n"):
-        lower = hline.lower()
-        if lower.startswith("content-length:"):
-            content_length = int(hline.split(":", 1)[1].strip())
-        if lower.startswith("transfer-encoding:") and "chunked" in lower:
+    for name, value in _iter_headers(header_text):
+        if name == "content-length":
+            content_length = int(value)
+        elif name == "transfer-encoding" and "chunked" in value.lower():
             is_chunked = True
     return content_length, is_chunked
 
@@ -297,12 +336,14 @@ async def _drain_body_from_headers(
     if is_chunked:
         while True:
             chunk_header = await upstream_reader.readline()
-            chunk_size = int(chunk_header.strip(), 16)
+            chunk_size = _parse_chunk_size(chunk_header)
             if chunk_size == 0:
                 await upstream_reader.readline()  # trailing \r\n
                 break
             await upstream_reader.readexactly(chunk_size + 2)
     elif content_length > 0:
+        if content_length > _MAX_RESPONSE_BYTES:
+            raise SmartSplitError(f"Response Content-Length {content_length} exceeds limit ({_MAX_RESPONSE_BYTES})")
         await upstream_reader.readexactly(content_length)
 
 
@@ -323,7 +364,7 @@ async def _relay_http_response_body(
         while True:
             chunk_header = await upstream_reader.readline()
             client_writer.write(chunk_header)
-            chunk_size = int(chunk_header.strip(), 16)
+            chunk_size = _parse_chunk_size(chunk_header)
             if chunk_size == 0:
                 trailing = await upstream_reader.readline()
                 client_writer.write(trailing)
@@ -335,6 +376,8 @@ async def _relay_http_response_body(
             if b'"usage"' in chunk_data:
                 _log_sse_usage(chunk_data)
     elif content_length > 0:
+        if content_length > _MAX_RESPONSE_BYTES:
+            raise SmartSplitError(f"Response Content-Length {content_length} exceeds limit ({_MAX_RESPONSE_BYTES})")
         body = await upstream_reader.readexactly(content_length)
         client_writer.write(body)
         await client_writer.drain()
@@ -380,7 +423,7 @@ async def _relay_http_response(
         while True:
             chunk_header = await upstream_reader.readline()
             client_writer.write(chunk_header)
-            chunk_size = int(chunk_header.strip(), 16)
+            chunk_size = _parse_chunk_size(chunk_header)
             if chunk_size == 0:
                 trailing = await upstream_reader.readline()
                 client_writer.write(trailing)
@@ -393,6 +436,8 @@ async def _relay_http_response(
             if b'"usage"' in chunk_data:
                 _log_sse_usage(chunk_data)
     elif content_length > 0:
+        if content_length > _MAX_RESPONSE_BYTES:
+            raise SmartSplitError(f"Response Content-Length {content_length} exceeds limit ({_MAX_RESPONSE_BYTES})")
         body = await upstream_reader.readexactly(content_length)
         client_writer.write(body)
         await client_writer.drain()
@@ -414,168 +459,248 @@ async def _handle_connect(
     await writer.drain()
 
     if host in _LLM_HOSTS:
-        # TLS termination with client (we impersonate the host)
-        ssl_ctx = await asyncio.to_thread(_get_host_ssl_context, ca_key, ca_cert, host)
-        try:
-            loop = asyncio.get_event_loop()
-            transport = writer.transport
-            new_transport = await loop.start_tls(transport, writer._protocol, ssl_ctx, server_side=True)
-            writer._transport = new_transport
-            reader._transport = new_transport
-        except Exception as exc:
-            logger.debug("TLS handshake failed (client) for %s: %s", host, exc)
-            with contextlib.suppress(Exception):
-                writer.close()
-            return
-
-        # Open ONE persistent TLS connection to the upstream host
-        upstream_ssl = ssl.create_default_context()
-        try:
-            upstream_reader, upstream_writer = await asyncio.open_connection(
-                host,
-                port,
-                ssl=upstream_ssl,
-            )
-        except Exception as exc:
-            logger.warning("Upstream connection to %s:%d failed: %s", host, port, exc)
-            with contextlib.suppress(Exception):
-                writer.close()
-            return
-
-        logger.info("Connected to upstream %s:%d (persistent)", host, port)
-
-        try:
-            while True:
-                # Read request from client
-                request_line, req_headers, body = await _read_http_request(reader)
-                if not request_line:
-                    break
-
-                parts = request_line.split(" ")
-                method = parts[0] if parts else "GET"
-                path = parts[1] if len(parts) > 1 else "/"
-                path_base = path.split("?")[0]
-
-                # Decide: pipeline or relay
-                if method == "POST" and path_base in _SMARTSPLIT_PATHS:
-                    try:
-                        body_dict = json.loads(body)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        body_dict = None
-
-                    if body_dict is not None:
-                        from smartsplit.pipeline import process_anthropic_request_lite
-
-                        action = await process_anthropic_request_lite(ctx, body_dict, req_headers, original_host=host)
-
-                        if action.get("type") == "fake":
-                            # Fake tool_use response — don't touch upstream
-                            resp_body = json.dumps(action["body"]).encode("utf-8")
-                            resp_bytes = _build_http_response(200, {"content-type": "application/json"}, resp_body)
-                            writer.write(resp_bytes)
-                            await writer.drain()
-                            logger.info("[%s] %s %s → FAKE tool_use", host, method, path[:60])
-                            continue
-
-                        if action.get("type") == "modified":
-                            # Pipeline modified the body (injected context) — relay modified body.
-                            # If upstream returns 429, set enrichment backoff and retry with original.
-                            modified_body = json.dumps(action["body"]).encode("utf-8")
-                            delta = len(modified_body) - len(body)
-                            logger.info(
-                                "[%s] Modified body: +%d bytes (~%d tokens added)",
-                                host,
-                                delta,
-                                delta // 4,
-                            )
-                            modified_headers = dict(req_headers)
-                            modified_headers["content-length"] = str(len(modified_body))
-                            raw_request = _rebuild_http_request(request_line, modified_headers, modified_body)
-                            upstream_writer.write(raw_request)
-                            await upstream_writer.drain()
-
-                            # Peek at response status before relaying to client
-                            resp_header_lines: list[bytes] = []
-                            while True:
-                                hline = await upstream_reader.readline()
-                                resp_header_lines.append(hline)
-                                if hline == b"\r\n" or hline == b"\n" or not hline:
-                                    break
-                            resp_header_block = b"".join(resp_header_lines)
-                            resp_first = resp_header_block.decode("utf-8", errors="replace").split("\r\n", 1)[0]
-                            resp_status = 0
-                            resp_parts = resp_first.split(" ", 2)
-                            if len(resp_parts) >= 2:
-                                with contextlib.suppress(ValueError):
-                                    resp_status = int(resp_parts[1])
-
-                            if resp_status == 429:
-                                # Drain 429 response body
-                                await _drain_body_from_headers(resp_header_block, upstream_reader)
-                                # Extract retry-after for enrichment backoff
-                                resp_hdr_text = resp_header_block.decode("utf-8", errors="replace")
-                                retry_after = _ENRICH_BACKOFF_DEFAULT
-                                for _hl in resp_hdr_text.split("\r\n"):
-                                    if _hl.lower().startswith("retry-after:"):
-                                        with contextlib.suppress(ValueError):
-                                            retry_after = int(_hl.split(":", 1)[1].strip())
-                                        break
-                                ctx.enrichment_skip_until = time.time() + retry_after
-                                logger.warning(
-                                    "[%s] %s %s → modified got 429, backoff %ds, retrying original",
-                                    host,
-                                    method,
-                                    path[:60],
-                                    retry_after,
-                                )
-                                # Reopen upstream connection and retry with original body
-                                with contextlib.suppress(Exception):
-                                    upstream_writer.close()
-                                upstream_reader, upstream_writer = await asyncio.open_connection(
-                                    host,
-                                    port,
-                                    ssl=upstream_ssl,
-                                )
-                                raw_original = _rebuild_http_request(request_line, req_headers, body)
-                                upstream_writer.write(raw_original)
-                                await upstream_writer.drain()
-                                resp_status = await _relay_http_response(upstream_reader, writer, ctx=ctx)
-                                logger.info("[%s] %s %s → fallback original → %d", host, method, path[:60], resp_status)
-                                continue
-
-                            # Not 429 — relay the response (headers already read, stream body)
-                            writer.write(resp_header_block)
-                            await writer.drain()
-                            await _relay_http_response_body(
-                                upstream_reader,
-                                writer,
-                                resp_header_block,
-                                ctx=ctx,
-                            )
-                            logger.info("[%s] %s %s → SmartSplit (modified) → %d", host, method, path[:60], resp_status)
-                            continue
-
-                        # type == "passthrough" — relay as-is (fall through)
-
-                # Relay: forward raw bytes to upstream, stream response back
-                raw_request = _rebuild_http_request(request_line, req_headers, body)
-                upstream_writer.write(raw_request)
-                await upstream_writer.drain()
-
-                resp_status = await _relay_http_response(upstream_reader, writer, ctx=ctx)
-                logger.info("[%s] %s %s → %d", host, method, path[:60], resp_status)
-
-        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
-            pass
-        except Exception as exc:
-            logger.debug("Connection error for %s: %s: %s", host, type(exc).__name__, exc)
-        finally:
-            with contextlib.suppress(Exception):
-                upstream_writer.close()
-            with contextlib.suppress(Exception):
-                writer.close()
+        await _intercept_llm_host(ctx, ca_key, ca_cert, reader, writer, host, port)
     else:
         await _tunnel_blind(reader, writer, host, port)
+
+
+async def _do_client_tls_handshake(
+    ca_key: object, ca_cert: object, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str
+) -> bool:
+    """Upgrade the accepted client connection to TLS, impersonating ``host``."""
+    ssl_ctx = await asyncio.to_thread(_get_host_ssl_context, ca_key, ca_cert, host)
+    try:
+        loop = asyncio.get_event_loop()
+        transport = writer.transport
+        new_transport = await loop.start_tls(transport, writer._protocol, ssl_ctx, server_side=True)
+        writer._transport = new_transport
+        reader._transport = new_transport
+        return True
+    except Exception as exc:
+        logger.debug("TLS handshake failed (client) for %s: %s", host, exc)
+        with contextlib.suppress(Exception):
+            writer.close()
+        return False
+
+
+async def _peek_response_status(upstream_reader: asyncio.StreamReader) -> tuple[bytes, int]:
+    """Read all response header lines (through the empty terminator) and parse the status code."""
+    lines: list[bytes] = []
+    while True:
+        hline = await upstream_reader.readline()
+        lines.append(hline)
+        if hline == b"\r\n" or hline == b"\n" or not hline:
+            break
+    header_block = b"".join(lines)
+    first_line = header_block.decode("utf-8", errors="replace").split("\r\n", 1)[0]
+    parts = first_line.split(" ", 2)
+    status = 0
+    if len(parts) >= 2:
+        with contextlib.suppress(ValueError):
+            status = int(parts[1])
+    return header_block, status
+
+
+def _extract_retry_after(header_block: bytes) -> int:
+    """Parse the ``retry-after`` header (seconds), falling back to the enrichment default."""
+    header_text = header_block.decode("utf-8", errors="replace")
+    for name, value in _iter_headers(header_text):
+        if name == "retry-after":
+            with contextlib.suppress(ValueError):
+                return int(value)
+    return _ENRICH_BACKOFF_DEFAULT
+
+
+async def _retry_with_original_body(
+    ctx: ProxyContext,
+    writer: asyncio.StreamWriter,
+    host: str,
+    port: int,
+    upstream_ssl: ssl.SSLContext,
+    request_line: str,
+    req_headers: dict[str, str],
+    body: bytes,
+    header_block: bytes,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, int]:
+    """Set enrichment backoff, reopen upstream, and relay the original (non-modified) request."""
+    retry_after = _extract_retry_after(header_block)
+    ctx.enrichment_skip_until = time.time() + retry_after
+    logger.warning("[%s] modified got 429, backoff %ds, retrying original", host, retry_after)
+
+    upstream_reader, upstream_writer = await asyncio.open_connection(host, port, ssl=upstream_ssl)
+    raw_original = _rebuild_http_request(request_line, req_headers, body)
+    upstream_writer.write(raw_original)
+    await upstream_writer.drain()
+    resp_status = await _relay_http_response(upstream_reader, writer, ctx=ctx)
+    return upstream_reader, upstream_writer, resp_status
+
+
+async def _forward_modified_body(
+    ctx: ProxyContext,
+    writer: asyncio.StreamWriter,
+    upstream_reader: asyncio.StreamReader,
+    upstream_writer: asyncio.StreamWriter,
+    host: str,
+    port: int,
+    upstream_ssl: ssl.SSLContext,
+    request_line: str,
+    req_headers: dict[str, str],
+    body: bytes,
+    modified_body_dict: dict,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Send an enriched request; on 429 roll back to the original body, otherwise relay normally."""
+    modified_body = json.dumps(modified_body_dict).encode("utf-8")
+    delta = len(modified_body) - len(body)
+    logger.info("[%s] Modified body: +%d bytes (~%d tokens added)", host, delta, delta // 4)
+
+    modified_headers = dict(req_headers)
+    modified_headers["content-length"] = str(len(modified_body))
+    upstream_writer.write(_rebuild_http_request(request_line, modified_headers, modified_body))
+    await upstream_writer.drain()
+
+    header_block, resp_status = await _peek_response_status(upstream_reader)
+
+    if resp_status == 429:
+        await _drain_body_from_headers(header_block, upstream_reader)
+        with contextlib.suppress(Exception):
+            upstream_writer.close()
+        new_reader, new_writer, _ = await _retry_with_original_body(
+            ctx,
+            writer,
+            host,
+            port,
+            upstream_ssl,
+            request_line,
+            req_headers,
+            body,
+            header_block,
+        )
+        return new_reader, new_writer
+
+    writer.write(header_block)
+    await writer.drain()
+    await _relay_http_response_body(upstream_reader, writer, header_block, ctx=ctx)
+    logger.info("[%s] SmartSplit (modified) → %d", host, resp_status)
+    return upstream_reader, upstream_writer
+
+
+async def _process_smartsplit_request(
+    ctx: ProxyContext,
+    writer: asyncio.StreamWriter,
+    upstream_reader: asyncio.StreamReader,
+    upstream_writer: asyncio.StreamWriter,
+    host: str,
+    port: int,
+    upstream_ssl: ssl.SSLContext,
+    request_line: str,
+    req_headers: dict[str, str],
+    body: bytes,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, bool]:
+    """Run the SmartSplit pipeline. Returns (upstream_reader, upstream_writer, handled)."""
+    try:
+        body_dict = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return upstream_reader, upstream_writer, False
+
+    from smartsplit.proxy.pipeline import process_anthropic_request_lite
+
+    action = await process_anthropic_request_lite(ctx, body_dict, req_headers, original_host=host)
+    action_type = action.get("type")
+
+    if action_type == "fake":
+        resp_body = json.dumps(action["body"]).encode("utf-8")
+        writer.write(_build_http_response(200, {"content-type": "application/json"}, resp_body))
+        await writer.drain()
+        logger.info("[%s] FAKE tool_use", host)
+        return upstream_reader, upstream_writer, True
+
+    if action_type == "modified":
+        upstream_reader, upstream_writer = await _forward_modified_body(
+            ctx,
+            writer,
+            upstream_reader,
+            upstream_writer,
+            host,
+            port,
+            upstream_ssl,
+            request_line,
+            req_headers,
+            body,
+            action["body"],
+        )
+        return upstream_reader, upstream_writer, True
+
+    return upstream_reader, upstream_writer, False
+
+
+async def _intercept_llm_host(
+    ctx: ProxyContext,
+    ca_key: object,
+    ca_cert: object,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    host: str,
+    port: int,
+) -> None:
+    """TLS-intercept ``host`` and run the per-request SmartSplit loop."""
+    if not await _do_client_tls_handshake(ca_key, ca_cert, reader, writer, host):
+        return
+
+    upstream_ssl = ssl.create_default_context()
+    try:
+        upstream_reader, upstream_writer = await asyncio.open_connection(host, port, ssl=upstream_ssl)
+    except Exception as exc:
+        logger.warning("Upstream connection to %s:%d failed: %s", host, port, exc)
+        with contextlib.suppress(Exception):
+            writer.close()
+        return
+
+    logger.info("Connected to upstream %s:%d (persistent)", host, port)
+
+    try:
+        while True:
+            request_line, req_headers, body = await _read_http_request(reader)
+            if not request_line:
+                break
+
+            parts = request_line.split(" ")
+            method = parts[0] if parts else "GET"
+            path = parts[1] if len(parts) > 1 else "/"
+            path_base = path.split("?")[0]
+
+            handled = False
+            if method == "POST" and path_base in _SMARTSPLIT_PATHS:
+                upstream_reader, upstream_writer, handled = await _process_smartsplit_request(
+                    ctx,
+                    writer,
+                    upstream_reader,
+                    upstream_writer,
+                    host,
+                    port,
+                    upstream_ssl,
+                    request_line,
+                    req_headers,
+                    body,
+                )
+
+            if handled:
+                continue
+
+            # Plain relay: forward raw bytes to upstream, stream response back.
+            upstream_writer.write(_rebuild_http_request(request_line, req_headers, body))
+            await upstream_writer.drain()
+            resp_status = await _relay_http_response(upstream_reader, writer, ctx=ctx)
+            logger.info("[%s] %s %s → %d", host, method, path[:60], resp_status)
+
+    except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+        pass
+    except Exception as exc:
+        logger.debug("Connection error for %s: %s: %s", host, type(exc).__name__, exc)
+    finally:
+        with contextlib.suppress(Exception):
+            upstream_writer.close()
+        with contextlib.suppress(Exception):
+            writer.close()
 
 
 async def _handle_client(
@@ -625,57 +750,20 @@ async def _handle_client(
 async def run_proxy(port: int = 8420, host: str = "127.0.0.1") -> None:
     """Start the SmartSplit proxy — single process, no internal HTTP server."""
     from smartsplit.config import load_config
-    from smartsplit.intention_detector import IntentionDetector
-    from smartsplit.learning import BanditScorer
-    from smartsplit.pipeline import ProxyContext
-    from smartsplit.planner import Planner
-    from smartsplit.providers.registry import ProviderRegistry
-    from smartsplit.quota import QuotaTracker
-    from smartsplit.router import Router
-    from smartsplit.tool_anticipator import ToolAnticipator
-    from smartsplit.tool_pattern_learner import ToolPatternLearner
+    from smartsplit.proxy.pipeline import build_proxy_context, shutdown_proxy_context
 
     ca_key, ca_cert = _ensure_ca()
 
-    # Initialize the SmartSplit context (same as create_app but without Starlette)
     cfg = load_config()
-    http_client = httpx.AsyncClient(
-        http2=True,
-        timeout=httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0),
-        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-    )
-    quota = QuotaTracker(provider_configs=cfg.providers)
-    registry = ProviderRegistry(
-        cfg.providers, http_client, free_llm_priority=cfg.free_llm_priority, brain_name=cfg.brain
-    )
-    planner = Planner(registry)
-    bandit = BanditScorer()
-    router = Router(registry, quota, cfg, bandit=bandit)
-    pattern_learner = ToolPatternLearner(project_dir=".")
-    detector = IntentionDetector(registry, pattern_learner=pattern_learner)
-    anticipator = ToolAnticipator(registry, working_dir=".")
-
-    ctx = ProxyContext(
-        config=cfg,
-        registry=registry,
-        planner=planner,
-        router=router,
-        quota=quota,
-        bandit=bandit,
-        http=http_client,
-        detector=detector,
-        anticipator=anticipator,
-        pattern_learner=pattern_learner,
-        mode=cfg.mode,
-    )
+    ctx = build_proxy_context(cfg, cfg.mode, read_timeout=120.0)
 
     llm_hosts = ", ".join(sorted(_LLM_HOSTS))
     logger.info("SmartSplit proxy listening on %s:%d", host, port)
     logger.info("Intercepting: %s", llm_hosts)
     logger.info(
         "Brain: %s | Workers: %s",
-        registry.brain_name,
-        [n for n in registry.get_llm_providers() if n != registry.brain_name],
+        ctx.registry.brain_name,
+        [n for n in ctx.registry.get_llm_providers() if n != ctx.registry.brain_name],
     )
     logger.info("CA certificate: %s", _CA_CERT)
 
@@ -689,10 +777,7 @@ async def run_proxy(port: int = 8420, host: str = "127.0.0.1") -> None:
         async with server:
             await server.serve_forever()
     finally:
-        quota.flush()
-        bandit.flush()
-        pattern_learner.flush()
-        await http_client.aclose()
+        await shutdown_proxy_context(ctx)
 
 
 def start_proxy(port: int = 8420, host: str = "127.0.0.1", log_level: str = "INFO") -> None:
