@@ -44,11 +44,8 @@ jobs:
       - name: Check if report has action items
         id: check
         run: |
-          if grep -q "No action needed" report.md; then
-            echo "has_actions=false" >> $GITHUB_OUTPUT
-          else
-            echo "has_actions=true" >> $GITHUB_OUTPUT
-          fi
+          result=$(python scripts/report_has_actions.py report.md)
+          echo "has_actions=$result" >> $GITHUB_OUTPUT
 
       - name: Create GitHub issue
         if: steps.check.outputs.has_actions == 'true'
