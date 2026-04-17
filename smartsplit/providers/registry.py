@@ -28,7 +28,7 @@ _CONTEXT_TIER_MAX_CHARS: dict[ContextTier, int] = {
 
 logger = logging.getLogger("smartsplit.registry")
 
-_KEY_PATTERN = re.compile(r"(sk-ant-|gsk_|AIza|tvly_|srp_|sk-|csk-|dsk-|mis-)\S+|\b[A-Za-z0-9_-]{32,}\b")
+_KEY_PATTERN = re.compile(r"(sk-ant-|sk-or-|sk-|gsk_|AIza|tvly_|srp_|csk-|dsk-|mis-|hf_|pplx-)\S+")
 
 
 # ── Circuit breaker ────────────────────────────────────────────

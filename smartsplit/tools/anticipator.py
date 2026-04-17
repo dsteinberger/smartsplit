@@ -35,6 +35,16 @@ _READ_FILE_LIMIT = 50_000  # chars — truncate after this
 _DIR_ENTRY_LIMIT = 200  # max directory entries
 _GREP_OUTPUT_LIMIT = 5_000  # chars — truncate grep output
 
+# Read-only git commands the anticipator can run. Kept at module level so the
+# dict is built once per process instead of on every _git_command invocation.
+_GIT_COMMANDS: dict[str, list[str]] = {
+    "git_status": ["git", "status", "--short"],
+    "git_log": ["git", "log", "--oneline", "-20"],
+    "git_diff": ["git", "diff"],
+    "git_show": ["git", "show", "--stat"],
+    "git_blame": ["git", "blame"],
+}
+
 
 # ── Data models ─────────────────────────────────────────────
 
@@ -312,14 +322,6 @@ class ToolAnticipator:
 
     def _git_command(self, command: str, args: dict) -> str:
         """Execute a read-only git command."""
-        _GIT_COMMANDS: dict[str, list[str]] = {
-            "git_status": ["git", "status", "--short"],
-            "git_log": ["git", "log", "--oneline", "-20"],
-            "git_diff": ["git", "diff"],
-            "git_show": ["git", "show", "--stat"],
-            "git_blame": ["git", "blame"],
-        }
-
         cmd = _GIT_COMMANDS.get(command)
         if not cmd:
             raise SmartSplitError("git: unknown command " + command)

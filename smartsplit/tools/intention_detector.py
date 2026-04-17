@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("smartsplit.intention_detector")
 
 _MIN_CONFIDENCE = 0.7  # conservative: 10% irrelevant content → -23% quality (context rot research)
-_FAKE_CONFIDENCE = 0.85  # threshold for FAKE tool_use — skip LLM if rules already reach this
+FAKE_TOOL_CONFIDENCE = 0.85  # threshold for FAKE tool_use — shared with proxy pipeline
 
 # ── Data classes ────────────────────────────────────────────
 
@@ -304,7 +304,7 @@ class IntentionDetector:
         # - Rules already have high confidence (saves free LLM quota)
         # - All free workers are in circuit breaker (avoids cascading 429s)
         llm_prediction = _NULL_PREDICTION
-        if rule_prediction.confidence < _FAKE_CONFIDENCE:
+        if rule_prediction.confidence < FAKE_TOOL_CONFIDENCE:
             try:
                 priority = self._registry._free_llm_priority
                 providers = self._registry._providers
@@ -414,7 +414,7 @@ class IntentionDetector:
         if not safe_tool_names:
             return _NULL_PREDICTION
 
-        safe_str = ", ".join(sorted(SAFE_TOOLS))
+        safe_str = ", ".join(safe_tool_names)
         avail_str = ", ".join(tool_names) if tool_names else "(not specified)"
         prompt = (
             _PREDICT_FROM_USER_TEMPLATE.replace("{safe_tools}", safe_str).replace("{available_tools}", avail_str)

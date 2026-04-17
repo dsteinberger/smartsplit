@@ -47,7 +47,7 @@ async def _extract_search_query(
             search_prompt = " ".join(str(q) for q in parsed[:3])
             if store_on_ctx:
                 # Expose the refined query for FAKE tool_use fallback when Serper fails.
-                ctx._last_search_query = search_prompt
+                ctx.last_search_query = search_prompt
             logger.info("Search query extracted: %r", search_prompt)
             return search_prompt
     except Exception as e:
@@ -232,7 +232,7 @@ async def enrich_only(
 
     Used in agent mode where the brain is the client's own LLM (passthrough).
     Returns worker results for injection into the request context.
-    Stores extracted search query on ctx._last_search_query for FAKE tool_use fallback.
+    Stores extracted search query on ctx.last_search_query for FAKE tool_use fallback.
     """
     logger.info("ENRICH workers only (%s)", enrichment_types)
 

@@ -69,10 +69,11 @@ from smartsplit.tools.anticipation import (
     extract_actual_tool_calls,
 )
 from smartsplit.tools.anticipator import ToolAnticipator
-from smartsplit.tools.intention_detector import IntentionDetector
+from smartsplit.tools.intention_detector import FAKE_TOOL_CONFIDENCE, IntentionDetector
 from smartsplit.tools.pattern_learner import ToolPatternLearner
 from smartsplit.triage.detector import _LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
 from smartsplit.triage.enrichment import (
+    _build_enriched_messages,
     enrich_and_forward,
     enrich_only,
 )
@@ -81,7 +82,6 @@ from smartsplit.triage.planner import Planner
 logger = logging.getLogger("smartsplit.proxy")
 
 _MAX_LOG_ENTRIES = 50
-_FAKE_TOOL_CONFIDENCE = 0.85  # higher than injection (0.7) — fake responses are riskier
 
 # Enrichment types useful in proxy mode — context_summary is redundant (brain has full context).
 _PROXY_USEFUL_ENRICHMENTS = {"web_search", "multi_perspective", "pre_analysis"}
@@ -143,6 +143,9 @@ class ProxyContext:
     )
     # Enrichment backoff — skip enrichment until this timestamp (set from retry-after on 429)
     enrichment_skip_until: float = 0.0  # 0 = enrichment allowed
+    # Last Google-ready query extracted by the enrichment phase — used for the
+    # FAKE web_search fallback when our Serper/Tavily call fails.
+    last_search_query: str = ""
 
 
 # ── Context factory ────────────────────────────────────────────
@@ -262,7 +265,7 @@ async def _try_fake_tool_use(ctx: ProxyContext, body_dict: dict, request_id: str
         return None
     prediction = await ctx.detector.predict(openai_body.get("messages", []), openai_body.get("tools"))
     fake_tools = [
-        {"tool": t.tool, "input": dict(t.args)} for t in prediction.tools if t.confidence >= _FAKE_TOOL_CONFIDENCE
+        {"tool": t.tool, "input": dict(t.args)} for t in prediction.tools if t.confidence >= FAKE_TOOL_CONFIDENCE
     ]
     if not fake_tools:
         return None
@@ -271,7 +274,7 @@ async def _try_fake_tool_use(ctx: ProxyContext, body_dict: dict, request_id: str
         "[%s] FAKE tool_use: %s (confidence>=%s)",
         request_id,
         [t["tool"] for t in fake_tools],
-        _FAKE_TOOL_CONFIDENCE,
+        FAKE_TOOL_CONFIDENCE,
     )
     return {"type": "fake", "body": build_fake_anthropic_tool_response(fake_tools, model=model)}
 
@@ -312,7 +315,7 @@ def _fake_web_search_fallback(
     ctx: ProxyContext, body_dict: dict, triage_prompt: str, model: str, request_id: str
 ) -> dict:
     """Build a FAKE tool_use action when our web_search failed but the agent has the tool."""
-    search_query = getattr(ctx, "_last_search_query", triage_prompt[:200])
+    search_query = ctx.last_search_query or triage_prompt[:200]
     agent_tool_name = "WebSearch" if anthropic_has_tool_named(body_dict, "WebSearch") else "web_search"
     logger.info("[%s] Serper failed → FAKE %s(%s)", request_id, agent_tool_name, search_query[:60])
     fake_tools = [{"tool": agent_tool_name, "input": {"query": search_query}}]
@@ -767,7 +770,7 @@ async def _handle_agent_mode(
             fake_tools = [
                 {"tool": t.tool, "input": dict(t.args)}
                 for t in prediction.tools
-                if t.confidence >= _FAKE_TOOL_CONFIDENCE
+                if t.confidence >= FAKE_TOOL_CONFIDENCE
             ]
             if fake_tools:
                 ctx.anticipation_stats["predictions_made"] += 1
@@ -775,7 +778,7 @@ async def _handle_agent_mode(
                     "[%s] FAKE tool_use: %s (confidence>=%s)",
                     request_id,
                     [t["tool"] for t in fake_tools],
-                    _FAKE_TOOL_CONFIDENCE,
+                    FAKE_TOOL_CONFIDENCE,
                 )
                 if enrichment_task:
                     enrichment_task.cancel()
@@ -788,8 +791,6 @@ async def _handle_agent_mode(
         if enrichment_task:
             enrichment_results = await enrichment_task
             if enrichment_results:
-                from smartsplit.triage.enrichment import _build_enriched_messages
-
                 body_dict["messages"] = _build_enriched_messages(raw_messages, prompt, enrichment_results)
                 logger.info("[%s] Enriched agent request with %s worker results", request_id, len(enrichment_results))
 

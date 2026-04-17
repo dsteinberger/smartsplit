@@ -327,7 +327,7 @@ class TestWebSearchCascade:
 
         ctx = _make_pipeline_ctx(has_search_provider=True)
         # Set the extracted search query
-        ctx._last_search_query = "Python 3.13 new features"
+        ctx.last_search_query = "Python 3.13 new features"
 
         body = {
             "model": "claude-sonnet-4-20250514",
@@ -364,7 +364,7 @@ class TestWebSearchCascade:
         from smartsplit.triage.detector import TriageDecision
 
         ctx = _make_pipeline_ctx(has_search_provider=True)
-        ctx._last_search_query = "test query"
+        ctx.last_search_query = "test query"
 
         body = {
             "model": "claude-sonnet-4-20250514",

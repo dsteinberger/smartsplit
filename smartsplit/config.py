@@ -395,7 +395,7 @@ def load_config() -> SmartSplitConfig:
     # Layer 2: JSON file
     config_path = find_config_path()
     if config_path.exists():
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             _deep_merge(raw, json.load(f))
 
     # Layer 3: environment variables
