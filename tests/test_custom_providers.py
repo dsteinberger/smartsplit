@@ -1,4 +1,4 @@
-"""Tests for custom-format providers (Anthropic, Gemini)."""
+"""Tests for custom-format providers (Anthropic, Gemini) and OpenAI-compatible backups."""
 
 from __future__ import annotations
 
@@ -10,7 +10,10 @@ import pytest
 from smartsplit.config import ProviderConfig
 from smartsplit.exceptions import ProviderError
 from smartsplit.providers.anthropic import AnthropicProvider
+from smartsplit.providers.cloudflare import CloudflareProvider
 from smartsplit.providers.gemini import GeminiProvider
+from smartsplit.providers.huggingface import HuggingFaceProvider
+from smartsplit.providers.perplexity import PerplexityProvider
 
 
 def _test_config(**overrides: object) -> ProviderConfig:
@@ -190,3 +193,121 @@ class TestGeminiProvider:
 
         with pytest.raises(ProviderError, match="Invalid JSON"):
             await provider.complete("test")
+
+
+# ── Perplexity (OpenAI-compatible, Sonar models) ─────────────
+
+
+class TestPerplexityProvider:
+    @pytest.fixture
+    def provider(self):
+        return PerplexityProvider(config=_test_config(model="sonar"), http=MagicMock())
+
+    def test_endpoint(self, provider):
+        assert provider.api_url == "https://api.perplexity.ai/chat/completions"
+
+    @pytest.mark.asyncio
+    async def test_complete_success(self, provider):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "choices": [{"message": {"content": "Sonar says hi"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        }
+        provider.http.post = AsyncMock(return_value=response)
+        result, usage = await provider.complete("ping")
+        assert result == "Sonar says hi"
+        assert usage.prompt_tokens == 3 and usage.completion_tokens == 4
+
+    @pytest.mark.asyncio
+    async def test_complete_http_error(self, provider):
+        response = MagicMock()
+        response.status_code = 429
+        response.raise_for_status.side_effect = httpx.HTTPStatusError("rate", request=MagicMock(), response=response)
+        provider.http.post = AsyncMock(return_value=response)
+        with pytest.raises(ProviderError, match="HTTP 429"):
+            await provider.complete("test")
+
+    @pytest.mark.asyncio
+    async def test_proxy_openai_forwards_body(self, provider):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        provider.http.post = AsyncMock(return_value=response)
+        result = await provider.proxy_openai_request({"model": "ignored", "messages": [], "stream": True})
+        assert result["choices"][0]["message"]["content"] == "ok"
+        body = provider.http.post.call_args[1]["json"]
+        assert body["model"] == "sonar"  # overridden from config
+        assert "stream" not in body  # stripped
+
+
+# ── HuggingFace Router (OpenAI-compatible) ───────────────────
+
+
+class TestHuggingFaceProvider:
+    @pytest.fixture
+    def provider(self):
+        return HuggingFaceProvider(
+            config=_test_config(model="Qwen/Qwen2.5-Coder-32B-Instruct"),
+            http=MagicMock(),
+        )
+
+    def test_endpoint(self, provider):
+        assert provider.api_url == "https://router.huggingface.co/v1/chat/completions"
+
+    @pytest.mark.asyncio
+    async def test_complete_success(self, provider):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": "HF response"}}]}
+        provider.http.post = AsyncMock(return_value=response)
+        result, _ = await provider.complete("ping")
+        assert result == "HF response"
+
+    @pytest.mark.asyncio
+    async def test_bearer_auth_header(self, provider):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": "x"}}]}
+        provider.http.post = AsyncMock(return_value=response)
+        await provider.complete("ping")
+        headers = provider.http.post.call_args[1]["headers"]
+        assert headers["Authorization"] == "Bearer test-key"
+
+
+# ── Cloudflare Workers AI ────────────────────────────────────
+
+
+class TestCloudflareProvider:
+    _VALID_ACCOUNT = "a" * 32
+
+    def test_requires_account_id(self, monkeypatch):
+        monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+        with pytest.raises(ProviderError, match="CLOUDFLARE_ACCOUNT_ID not set"):
+            CloudflareProvider(config=_test_config(), http=MagicMock())
+
+    def test_rejects_malformed_account_id(self, monkeypatch):
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "not-hex")
+        with pytest.raises(ProviderError, match="32-char hex"):
+            CloudflareProvider(config=_test_config(), http=MagicMock())
+
+    def test_builds_api_url(self, monkeypatch):
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", self._VALID_ACCOUNT)
+        provider = CloudflareProvider(config=_test_config(), http=MagicMock())
+        assert provider.api_url == (
+            f"https://api.cloudflare.com/client/v4/accounts/{self._VALID_ACCOUNT}/ai/v1/chat/completions"
+        )
+
+    @pytest.mark.asyncio
+    async def test_complete_success(self, monkeypatch):
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", self._VALID_ACCOUNT)
+        provider = CloudflareProvider(
+            config=_test_config(model="@cf/meta/llama-3"),
+            http=MagicMock(),
+        )
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {"choices": [{"message": {"content": "CF reply"}}]}
+        provider.http.post = AsyncMock(return_value=response)
+        result, _ = await provider.complete("ping")
+        assert result == "CF reply"
