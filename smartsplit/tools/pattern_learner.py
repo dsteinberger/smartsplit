@@ -144,7 +144,7 @@ def _normalize_tool_call(tc: dict[str, str]) -> str:
     return tool + ":*"
 
 
-def _extract_context_signals(messages: list[dict[str, str]]) -> dict[str, object]:
+def extract_context_signals(messages: list[dict[str, str]]) -> dict[str, object]:
     """Extract context signals from a message history."""
     signals: dict[str, object] = {
         "mentioned_files": [],
@@ -297,7 +297,7 @@ class ToolPatternLearner:
         """Compare pending prediction vs actual tools called; learn patterns."""
         with self._lock:
             try:
-                signals = _extract_context_signals(messages)
+                signals = extract_context_signals(messages)
                 self._learn_patterns(actual_tools, signals)
                 self._update_accuracy(actual_tools)
                 data = self._data
@@ -623,7 +623,7 @@ class ToolPatternLearner:
         min_confidence: float,
     ) -> list[dict[str, str | float]]:
         """Compute suggestions from all pattern types. Caller must hold self._lock."""
-        signals = _extract_context_signals(messages)
+        signals = extract_context_signals(messages)
         mentioned_files = _as_str_list(signals, "mentioned_files")
         mentioned_exts = _as_str_list(signals, "mentioned_extensions")
         last_tool = str(signals.get("last_tool", ""))

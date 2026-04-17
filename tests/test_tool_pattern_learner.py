@@ -9,10 +9,10 @@ from pathlib import Path
 from smartsplit.tools.pattern_learner import (
     ToolPatternLearner,
     _abstract_tool_call,
-    _extract_context_signals,
     _extract_error_keywords,
     _extract_file_paths,
     _normalize_tool_call,
+    extract_context_signals,
 )
 
 # ── _extract_file_paths regex ────────────────────────────────
@@ -394,17 +394,17 @@ class TestNormalizeToolCall:
         assert result == "read_file:*"
 
 
-# ── _extract_context_signals ────────────────────────────────
+# ── extract_context_signals ────────────────────────────────
 
 
 class TestExtractContextSignals:
     def test_empty_messages(self):
-        signals = _extract_context_signals([])
+        signals = extract_context_signals([])
         assert signals["mentioned_files"] == []
         assert signals["is_first_turn"] is False
 
     def test_first_turn(self):
-        signals = _extract_context_signals([{"role": "user", "content": "Hello"}])
+        signals = extract_context_signals([{"role": "user", "content": "Hello"}])
         assert signals["is_first_turn"] is True
 
     def test_not_first_turn(self):
@@ -413,11 +413,11 @@ class TestExtractContextSignals:
             {"role": "assistant", "content": "ok"},
             {"role": "user", "content": "second"},
         ]
-        signals = _extract_context_signals(messages)
+        signals = extract_context_signals(messages)
         assert signals["is_first_turn"] is False
 
     def test_file_mentions_extracted(self):
-        signals = _extract_context_signals([{"role": "user", "content": "Fix auth.py and models.py"}])
+        signals = extract_context_signals([{"role": "user", "content": "Fix auth.py and models.py"}])
         assert "auth.py" in signals["mentioned_files"]
         assert ".py" in signals["mentioned_extensions"]
 
@@ -430,7 +430,7 @@ class TestExtractContextSignals:
             },
             {"role": "tool", "content": "Traceback (most recent call last):\n  ImportError: no module"},
         ]
-        signals = _extract_context_signals(messages)
+        signals = extract_context_signals(messages)
         assert signals["result_has_error"] is True
         assert "Traceback" in signals["result_error_keywords"]
         assert signals["last_tool"] == "Bash"
@@ -440,7 +440,7 @@ class TestExtractContextSignals:
             {"role": "assistant", "content": "just text"},
             {"role": "tool", "content": "some output"},
         ]
-        signals = _extract_context_signals(messages)
+        signals = extract_context_signals(messages)
         assert signals["last_tool"] == ""
 
     def test_tool_call_with_json_args(self):
@@ -452,7 +452,7 @@ class TestExtractContextSignals:
             },
             {"role": "tool", "content": "file contents"},
         ]
-        signals = _extract_context_signals(messages)
+        signals = extract_context_signals(messages)
         assert signals["last_tool"] == "read_file"
         assert signals["last_tool_args"] == {"path": "x.py"}
 
@@ -465,7 +465,7 @@ class TestExtractContextSignals:
             },
             {"role": "tool", "content": "output"},
         ]
-        signals = _extract_context_signals(messages)
+        signals = extract_context_signals(messages)
         assert signals["last_tool"] == "Bash"
         assert signals["last_tool_args"] == {}
 

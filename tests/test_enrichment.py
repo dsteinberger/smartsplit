@@ -1,4 +1,4 @@
-"""Tests for the enrichment pipeline — _build_enrichment_subtasks, _build_enriched_messages, enrich_and_forward."""
+"""Tests for the enrichment pipeline — _build_enrichment_subtasks, build_enriched_messages, enrich_and_forward."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from smartsplit.models import (
 )
 from smartsplit.proxy.formats import anthropic_has_tool_named
 from smartsplit.triage.enrichment import (
-    _build_enriched_messages,
     _build_enrichment_subtasks,
+    build_enriched_messages,
     enrich_and_forward,
 )
 
@@ -76,7 +76,7 @@ class TestBuildEnrichmentSubtasks:
         assert types == [TaskType.WEB_SEARCH, TaskType.REASONING, TaskType.REASONING]
 
 
-# ── _build_enriched_messages ────────────────────────────────────
+# ── build_enriched_messages ────────────────────────────────────
 
 
 class TestBuildEnrichedMessages:
@@ -99,7 +99,7 @@ class TestBuildEnrichedMessages:
             {"role": "user", "content": "my question"},
         ]
         results = [self._make_result("web info")]
-        enriched = _build_enriched_messages(messages, "my question", results)
+        enriched = build_enriched_messages(messages, "my question", results)
         assert len(enriched) == 2
         assert "[Additional context gathered by SmartSplit" in enriched[1]["content"]
         assert "Web Search: web info" in enriched[1]["content"]
@@ -108,20 +108,20 @@ class TestBuildEnrichedMessages:
 
     def test_returns_original_when_no_results(self):
         messages = [{"role": "user", "content": "hello"}]
-        result = _build_enriched_messages(messages, "hello", [])
+        result = build_enriched_messages(messages, "hello", [])
         assert result is messages
 
     def test_skips_non_completed_results(self):
         messages = [{"role": "user", "content": "hello"}]
         results = [self._make_result("fail", termination=TerminationState.ALL_FAILED)]
-        enriched = _build_enriched_messages(messages, "hello", results)
+        enriched = build_enriched_messages(messages, "hello", results)
         # Non-completed results should be skipped, so messages returned as-is
         assert enriched is messages
 
     def test_skips_empty_response(self):
         messages = [{"role": "user", "content": "hello"}]
         results = [self._make_result("")]
-        enriched = _build_enriched_messages(messages, "hello", results)
+        enriched = build_enriched_messages(messages, "hello", results)
         # Empty response is skipped; RouteResult requires response to be str,
         # but the filter `if r.response` catches empty strings
         assert enriched is messages
@@ -129,7 +129,7 @@ class TestBuildEnrichedMessages:
     def test_deep_copies_original_messages(self):
         messages = [{"role": "user", "content": "original"}]
         results = [self._make_result("context")]
-        enriched = _build_enriched_messages(messages, "original", results)
+        enriched = build_enriched_messages(messages, "original", results)
         # enriched should be modified
         assert "[Additional context" in enriched[0]["content"]
         # original must NOT be mutated
@@ -138,7 +138,7 @@ class TestBuildEnrichedMessages:
     def test_appends_user_message_when_none_exists(self):
         messages = [{"role": "system", "content": "system only"}]
         results = [self._make_result("context")]
-        enriched = _build_enriched_messages(messages, "prompt", results)
+        enriched = build_enriched_messages(messages, "prompt", results)
         assert len(enriched) == 2
         assert enriched[-1]["role"] == "user"
         assert "[Additional context" in enriched[-1]["content"]

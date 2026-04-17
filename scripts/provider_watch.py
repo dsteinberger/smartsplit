@@ -323,7 +323,7 @@ async def analyze(http: httpx.AsyncClient, search_results: str) -> str:
                 "qwen-3-235b-a22b-instruct-2507",
                 prompt,
             )
-        except Exception as e:
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError) as e:
             print(f"WARNING: Cerebras failed, falling back to Groq: {e}", file=sys.stderr)
 
     # Groq (LLaMA 70B) — fallback

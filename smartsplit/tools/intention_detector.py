@@ -24,6 +24,7 @@ from smartsplit.json_utils import extract_json
 from smartsplit.tools.registry import FILE_REF_RE as _FILE_REF_RE
 from smartsplit.tools.registry import SAFE_TOOLS
 from smartsplit.tools.registry import WELL_KNOWN_FILES as _WELL_KNOWN_FILES
+from smartsplit.triage.i18n_keywords import INTENT_KEYWORDS_I18N
 
 if TYPE_CHECKING:
     from smartsplit.providers.registry import ProviderRegistry
@@ -67,7 +68,7 @@ _NULL_PREDICTION = Prediction(should_anticipate=False, confidence=0.0, tools=[])
 # without needing an LLM prediction.
 
 # Intent keywords — English base + multilingual from i18n_keywords.py
-_FIX_KEYWORDS = [
+_FIX_KEYWORDS_BASE = [
     "fix",
     "bug",
     "error",
@@ -80,7 +81,7 @@ _FIX_KEYWORDS = [
     "ValueError",
     "undefined",
 ]
-_SEARCH_KEYWORDS = [
+_SEARCH_KEYWORDS_BASE = [
     "find",
     "where",
     "locate",
@@ -90,19 +91,20 @@ _SEARCH_KEYWORDS = [
     "usage of",
     "defined",
 ]
-_TEST_KEYWORDS = ["test", "tests", "spec", "coverage", "unit test", "integration test"]
+_TEST_KEYWORDS_BASE = ["test", "tests", "spec", "coverage", "unit test", "integration test"]
 
-# Merge multilingual intent keywords
-from smartsplit.triage.i18n_keywords import INTENT_KEYWORDS_I18N  # noqa: E402
 
-for _lang_kw in INTENT_KEYWORDS_I18N.values():
-    _FIX_KEYWORDS.extend(_lang_kw.get("fix_debug", []))
-    _SEARCH_KEYWORDS.extend(_lang_kw.get("search", []))
-    _TEST_KEYWORDS.extend(_lang_kw.get("test", []))
-# Deduplicate
-_FIX_KEYWORDS = list(dict.fromkeys(_FIX_KEYWORDS))
-_SEARCH_KEYWORDS = list(dict.fromkeys(_SEARCH_KEYWORDS))
-_TEST_KEYWORDS = list(dict.fromkeys(_TEST_KEYWORDS))
+def _merge_intent_keywords(base: list[str], key: str) -> list[str]:
+    """Merge per-language intent keywords from INTENT_KEYWORDS_I18N under a named bucket."""
+    merged = list(base)
+    for lang_kw in INTENT_KEYWORDS_I18N.values():
+        merged.extend(lang_kw.get(key, []))
+    return list(dict.fromkeys(merged))
+
+
+_FIX_KEYWORDS = _merge_intent_keywords(_FIX_KEYWORDS_BASE, "fix_debug")
+_SEARCH_KEYWORDS = _merge_intent_keywords(_SEARCH_KEYWORDS_BASE, "search")
+_TEST_KEYWORDS = _merge_intent_keywords(_TEST_KEYWORDS_BASE, "test")
 
 _STACKTRACE_RE = re.compile(r"(File \"([^\"]+)\", line \d+|at .+\((.+\.\w+:\d+)\))", re.MULTILINE)
 
@@ -306,18 +308,17 @@ class IntentionDetector:
         llm_prediction = _NULL_PREDICTION
         if rule_prediction.confidence < FAKE_TOOL_CONFIDENCE:
             try:
-                priority = self._registry._free_llm_priority
-                providers = self._registry._providers
-                if not isinstance(priority, list) or not isinstance(providers, dict):
-                    has_healthy_worker = True
+                priority = self._registry.free_llm_priority
+                if not isinstance(priority, list):
+                    has_healthy_worker = True  # mock registry — assume available
                 else:
                     has_healthy_worker = any(
                         self._registry.circuit_breaker.is_healthy(name)
                         for name in priority
-                        if providers.get(name) is not None
+                        if self._registry.get(name) is not None
                     )
             except (AttributeError, TypeError):
-                has_healthy_worker = True  # assume available if registry doesn't support check
+                has_healthy_worker = True  # tolerate registries without this API
             if has_healthy_worker:
                 if role == "user":
                     content = last.get("content", "")

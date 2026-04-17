@@ -309,7 +309,7 @@ class ToolAnticipator:
             raise SmartSplitError("web_fetch: empty URL")
 
         try:
-            response = await self._registry._http.get(url, timeout=_TOOL_TIMEOUT)
+            response = await self._registry.http_client.get(url, timeout=_TOOL_TIMEOUT)
             response.raise_for_status()
         except Exception as exc:
             raise SmartSplitError("web_fetch: " + str(exc)[:200]) from exc

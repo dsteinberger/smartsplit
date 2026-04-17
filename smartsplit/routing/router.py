@@ -186,6 +186,50 @@ class Router:
         self._config = config
         self._bandit = bandit
 
+    @staticmethod
+    def _compute_weights(mode: Mode, complexity: Complexity) -> tuple[float, float, float]:
+        """Return (w_quality, w_cost, w_availability) weights for ``mode`` + ``complexity``."""
+        w_quality, w_cost, w_avail = _MODE_WEIGHTS.get(mode, _MODE_WEIGHTS[Mode.BALANCED])
+        boost = _COMPLEXITY_QUALITY_BOOST.get(complexity, 0.0)
+        return (
+            min(1.0, max(0.0, w_quality + boost)),
+            min(1.0, max(0.0, w_cost - boost)),
+            w_avail,
+        )
+
+    def _compute_quality(
+        self, provider_name: str, subtask: Subtask, tier: str, pconfig: ProviderConfig | None
+    ) -> float:
+        """Blend the static competence score with the MAB's learned score for this tier."""
+        competence = self._config.competence_table.get(
+            subtask.type.value,
+            self._config.competence_table.get("general", {}),
+        )
+        tiered_key = f"{provider_name}:{tier}"
+        static_quality = competence.get(tiered_key, competence.get(provider_name, _DEFAULT_COMPETENCE_SCORE)) / 10.0
+        bandit_key = tiered_key if pconfig and pconfig.type == ProviderType.PAID else provider_name
+        if self._bandit:
+            return self._bandit.score(subtask.type.value, bandit_key, prior=static_quality)
+        return static_quality
+
+    @staticmethod
+    def _compute_cost(provider_type: ProviderType, tier: str) -> float:
+        """Cost score: free = 1.0, paid fast = 0.5, paid strong = 0.2."""
+        if provider_type == ProviderType.FREE:
+            return 1.0
+        if tier == "fast":
+            return 0.5
+        return 0.2
+
+    def _compute_availability(self, provider_name: str) -> float:
+        """1.0 when ample quota remains, degrades linearly below the danger threshold."""
+        raw_avail = self._quota.get_availability(provider_name)
+        if raw_avail >= _AVAILABILITY_DANGER_THRESHOLD:
+            return 1.0
+        if raw_avail <= 0.0:
+            return 0.0
+        return raw_avail / _AVAILABILITY_DANGER_THRESHOLD
+
     def score(
         self,
         provider_name: str,
@@ -198,106 +242,86 @@ class Router:
         Uses an additive weighted formula so that one weak factor
         doesn't zero out the entire score (unlike the old multiplicative approach).
         """
-        # Base weights from mode
-        w_quality, w_cost, w_avail = _MODE_WEIGHTS.get(mode, _MODE_WEIGHTS[Mode.BALANCED])
-
-        # Complexity shifts weight between quality and cost
-        boost = _COMPLEXITY_QUALITY_BOOST.get(subtask.complexity, 0.0)
-        w_quality = min(1.0, max(0.0, w_quality + boost))
-        w_cost = min(1.0, max(0.0, w_cost - boost))
-
-        # Quality: MAB score (learned) with competence table as prior (static)
-        competence = self._config.competence_table.get(
-            subtask.type.value,
-            self._config.competence_table.get("general", {}),
-        )
+        w_quality, w_cost, w_avail = self._compute_weights(mode, subtask.complexity)
         pconfig = self._config.providers.get(provider_name)
         tier = _resolve_tier(pconfig, subtask.complexity)
-        tiered_key = f"{provider_name}:{tier}"
-        static_quality = competence.get(tiered_key, competence.get(provider_name, _DEFAULT_COMPETENCE_SCORE)) / 10.0
 
-        # Use tiered key for MAB so fast/strong are scored independently
-        bandit_key = tiered_key if pconfig and pconfig.type == ProviderType.PAID else provider_name
-        if self._bandit:
-            quality = self._bandit.score(subtask.type.value, bandit_key, prior=static_quality)
-        else:
-            quality = static_quality
-
-        # Cost: free = 1.0, paid:fast = 0.5 (cheap paid), paid:strong = 0.2 (expensive but not zero)
-        if provider_type == ProviderType.FREE:
-            cost_score = 1.0
-        elif tier == "fast":
-            cost_score = 0.5
-        else:
-            cost_score = 0.2
-
-        # Availability: 1.0 if above danger threshold, degrades below it
-        raw_avail = self._quota.get_availability(provider_name)
-        if raw_avail >= _AVAILABILITY_DANGER_THRESHOLD:
-            avail_score = 1.0
-        elif raw_avail <= 0.0:
-            avail_score = 0.0
-        else:
-            avail_score = raw_avail / _AVAILABILITY_DANGER_THRESHOLD
+        quality = self._compute_quality(provider_name, subtask, tier, pconfig)
+        cost_score = self._compute_cost(provider_type, tier)
+        avail_score = self._compute_availability(provider_name)
 
         return w_quality * quality + w_cost * cost_score + w_avail * avail_score
 
     @staticmethod
-    def quality_gate_reason(response: str, subtask: Subtask) -> str | None:
-        """Check if a response meets minimum quality standards.
-
-        Returns None if the response passes, or a short reason string if it fails.
-
-        Checks (language-agnostic where possible):
-        1. Empty / too short
-        2. Refusal patterns (beginning of response)
-        3. Substance check — repetition ratio, word diversity
-        4. Structure check — code presence when code is requested
-        """
-        if not response or not response.strip():
-            return "empty"
-
-        stripped = response.strip()
-
-        # 1. Length check based on complexity
-        min_len = _MIN_RESPONSE_LENGTH.get(subtask.complexity, 5)
+    def _reject_on_length(stripped: str, complexity: Complexity) -> str | None:
+        """Reject responses shorter than the minimum for the given complexity."""
+        min_len = _MIN_RESPONSE_LENGTH.get(complexity, 5)
         if len(stripped) < min_len:
             return f"too_short ({len(stripped)}<{min_len})"
+        return None
 
-        # 2. Refusal pattern check — scan beginning only
+    @staticmethod
+    def _reject_on_refusal(stripped: str) -> str | None:
+        """Reject refusals/boilerplate apologies detected at the start of the response."""
         response_start = stripped[:_ERROR_SCAN_LENGTH].lower()
         for pattern in _ERROR_PATTERNS:
             if pattern in response_start:
                 return f"refusal_pattern ({pattern!r})"
+        return None
 
-        # 3. Substance checks (language-agnostic)
-        if len(stripped) > 50:
-            words = stripped.split()
-            if words:
-                # High repetition = low quality (e.g. "the the the the")
-                unique_ratio = len(set(words)) / len(words)
-                if unique_ratio < 0.3:
-                    return f"repetition ({unique_ratio:.0%} unique)"
+    @staticmethod
+    def _reject_on_substance(stripped: str) -> str | None:
+        """Reject low-substance responses: heavy repetition, gibberish, or mostly whitespace."""
+        if len(stripped) <= 50:
+            return None
+        words = stripped.split()
+        if words:
+            unique_ratio = len(set(words)) / len(words)
+            if unique_ratio < 0.3:
+                return f"repetition ({unique_ratio:.0%} unique)"
+            avg_word_len = sum(len(w) for w in words) / len(words)
+            if avg_word_len < 1.5:
+                return f"gibberish (avg_word_len={avg_word_len:.1f})"
+        content_ratio = len(stripped.replace(" ", "").replace("\n", "")) / len(stripped)
+        if content_ratio < 0.3:
+            return f"mostly_whitespace ({content_ratio:.0%} content)"
+        return None
 
-                # Very short average word length = gibberish
-                avg_word_len = sum(len(w) for w in words) / len(words)
-                if avg_word_len < 1.5:
-                    return f"gibberish (avg_word_len={avg_word_len:.1f})"
+    @staticmethod
+    def _reject_on_missing_code(stripped: str, response: str, subtask: Subtask) -> str | None:
+        """Reject long code-task responses that ship no code snippet."""
+        if subtask.type != TaskType.CODE or subtask.complexity == Complexity.LOW:
+            return None
+        prompt_lower = subtask.content[:200].lower()
+        if not any(w in prompt_lower for w in ("write", "implement", "create", "build", "code")):
+            return None
+        has_code = "```" in response or "def " in response or "class " in response or "function " in response
+        if not has_code and len(stripped) > 200:
+            return "missing_code"
+        return None
 
-            # Response is mostly whitespace / newlines
-            content_ratio = len(stripped.replace(" ", "").replace("\n", "")) / len(stripped)
-            if content_ratio < 0.3:
-                return f"mostly_whitespace ({content_ratio:.0%} content)"
+    @staticmethod
+    def quality_gate_reason(response: str, subtask: Subtask) -> str | None:
+        """Return a short reason why the response fails the quality gate, or None if it passes.
 
-        # 4. Structure check — code tasks with "write"/"implement" should contain code
-        if subtask.type == TaskType.CODE and subtask.complexity != Complexity.LOW:
-            prompt_lower = subtask.content[:200].lower()
-            asks_for_code = any(w in prompt_lower for w in ("write", "implement", "create", "build", "code"))
-            if asks_for_code:
-                has_code = "```" in response or "def " in response or "class " in response or "function " in response
-                if not has_code and len(stripped) > 200:
-                    return "missing_code"
+        Checks (language-agnostic where possible):
+        1. Empty / too short
+        2. Refusal patterns (beginning of response)
+        3. Substance — repetition ratio, word diversity, whitespace density
+        4. Structure — code presence when code is requested
+        """
+        if not response or not response.strip():
+            return "empty"
+        stripped = response.strip()
 
+        for check in (
+            Router._reject_on_length(stripped, subtask.complexity),
+            Router._reject_on_refusal(stripped),
+            Router._reject_on_substance(stripped),
+            Router._reject_on_missing_code(stripped, response, subtask),
+        ):
+            if check is not None:
+                return check
         return None
 
     @staticmethod

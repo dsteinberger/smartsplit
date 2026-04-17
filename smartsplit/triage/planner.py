@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from smartsplit.exceptions import SmartSplitError
 from smartsplit.json_utils import extract_json
 from smartsplit.models import Complexity, Mode, RouteResult, Subtask, TaskType
+from smartsplit.triage.i18n_keywords import DOMAIN_KEYWORDS_I18N
 
 if TYPE_CHECKING:
     from smartsplit.providers.registry import ProviderRegistry
@@ -42,7 +43,7 @@ MAX_SUBTASKS: dict[Mode, int] = {
 
 # Keyword heuristics for fast domain classification.
 # Each domain maps to a set of trigger words/patterns.
-_DOMAIN_KEYWORDS: dict[str, list[str]] = {
+_DOMAIN_KEYWORDS_BASE: dict[str, list[str]] = {
     "code": [
         "function",
         "class",
@@ -254,15 +255,21 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
-# Merge multilingual keywords into domain lists (deduplicated).
-from smartsplit.triage.i18n_keywords import DOMAIN_KEYWORDS_I18N as _I18N  # noqa: E402
 
-for _lang_keywords in _I18N.values():
-    for _domain, _keywords in _lang_keywords.items():
-        if _domain in _DOMAIN_KEYWORDS:
-            _DOMAIN_KEYWORDS[_domain].extend(_keywords)
-for _domain in _DOMAIN_KEYWORDS:
-    _DOMAIN_KEYWORDS[_domain] = list(dict.fromkeys(_DOMAIN_KEYWORDS[_domain]))
+def _merge_i18n_domain_keywords(
+    base: dict[str, list[str]],
+    i18n: dict[str, dict[str, list[str]]],
+) -> dict[str, list[str]]:
+    """Merge per-language keyword lists into the base domain dict, deduplicated."""
+    merged = {domain: list(keywords) for domain, keywords in base.items()}
+    for lang_keywords in i18n.values():
+        for domain, keywords in lang_keywords.items():
+            if domain in merged:
+                merged[domain].extend(keywords)
+    return {domain: list(dict.fromkeys(words)) for domain, words in merged.items()}
+
+
+_DOMAIN_KEYWORDS: dict[str, list[str]] = _merge_i18n_domain_keywords(_DOMAIN_KEYWORDS_BASE, DOMAIN_KEYWORDS_I18N)
 
 # Map keyword groups to TaskType values.
 _DOMAIN_TO_TASK_TYPE: dict[str, TaskType] = {

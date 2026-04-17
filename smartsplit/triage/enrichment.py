@@ -20,7 +20,7 @@ from smartsplit.models import (
     TaskType,
     TerminationState,
 )
-from smartsplit.tools.anticipation import _SEARCH_QUERY_PROMPT, _extract_project_context
+from smartsplit.tools.anticipation import SEARCH_QUERY_PROMPT, extract_project_context
 
 if TYPE_CHECKING:
     from smartsplit.proxy.pipeline import ProxyContext
@@ -37,9 +37,9 @@ async def _extract_search_query(
 ) -> str:
     """Refine ``prompt`` into a concise Google-ready query via free LLM, else return it unchanged."""
     try:
-        context = _extract_project_context(messages or [])
+        context = extract_project_context(messages or [])
         raw_queries = await ctx.registry.call_free_llm(
-            _SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", prompt),
+            SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", prompt),
             prefer="cerebras",
         )
         parsed = json.loads(extract_json(raw_queries))
@@ -113,7 +113,7 @@ def _build_enrichment_subtasks(
     return subtasks
 
 
-def _build_enriched_messages(
+def build_enriched_messages(
     original_messages: list[dict[str, str]],
     prompt: str,
     worker_results: list[RouteResult],
@@ -184,7 +184,7 @@ async def enrich_and_forward(
                 logger.debug("Worker [%s] via %s: %s", r.type.value, r.provider, r.response[:200] if r.response else "")
 
     # Build enriched messages and forward to brain
-    enriched_messages = _build_enriched_messages(
+    enriched_messages = build_enriched_messages(
         messages or [{"role": "user", "content": prompt}],
         prompt,
         worker_results,

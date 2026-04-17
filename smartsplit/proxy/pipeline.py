@@ -41,7 +41,7 @@ from smartsplit.models import (
     TerminationState,
     short_id,
 )
-from smartsplit.providers.registry import _PROVIDER_CALL_TIMEOUT, ProviderRegistry
+from smartsplit.providers.registry import PROVIDER_CALL_TIMEOUT, ProviderRegistry
 from smartsplit.proxy.formats import (
     OpenAIRequest,
     anthropic_has_tool_named,
@@ -71,9 +71,9 @@ from smartsplit.tools.anticipation import (
 from smartsplit.tools.anticipator import ToolAnticipator
 from smartsplit.tools.intention_detector import FAKE_TOOL_CONFIDENCE, IntentionDetector
 from smartsplit.tools.pattern_learner import ToolPatternLearner
-from smartsplit.triage.detector import _LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
+from smartsplit.triage.detector import LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
 from smartsplit.triage.enrichment import (
-    _build_enriched_messages,
+    build_enriched_messages,
     enrich_and_forward,
     enrich_only,
 )
@@ -590,7 +590,7 @@ async def _forward_to_anthropic_host(
         )
 
     else:
-        async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
+        async with asyncio.timeout(PROVIDER_CALL_TIMEOUT):
             response = await ctx.http.post(url, headers=headers, json=proxy_body)
 
         if response.status_code in (429, 401, 403, 529):
@@ -634,7 +634,7 @@ async def _raw_passthrough(
     url = f"https://{host}/v1/messages"
     headers = dict(passthrough_headers)
     headers["Content-Type"] = "application/json"
-    async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
+    async with asyncio.timeout(PROVIDER_CALL_TIMEOUT):
         response = await ctx.http.post(url, headers=headers, json=proxy_body)
         response.raise_for_status()
     return PipelineResult(body=response.json())
@@ -718,7 +718,7 @@ async def _triage_request(
     if not triage_prompt or not ctx.enabled:
         return TriageDecision.TRANSPARENT, []
     decision, enrichment_types = detect(triage_prompt, raw_messages)
-    if decision == TriageDecision.TRANSPARENT and len(triage_prompt.strip()) >= _LLM_DETECT_MIN_CHARS:
+    if decision == TriageDecision.TRANSPARENT and len(triage_prompt.strip()) >= LLM_DETECT_MIN_CHARS:
         decision, enrichment_types = await detect_with_llm(triage_prompt, ctx.registry)
     return decision, enrichment_types
 
@@ -791,7 +791,7 @@ async def _handle_agent_mode(
         if enrichment_task:
             enrichment_results = await enrichment_task
             if enrichment_results:
-                body_dict["messages"] = _build_enriched_messages(raw_messages, prompt, enrichment_results)
+                body_dict["messages"] = build_enriched_messages(raw_messages, prompt, enrichment_results)
                 logger.info("[%s] Enriched agent request with %s worker results", request_id, len(enrichment_results))
 
         raw_response = await ctx.registry.proxy_to_brain(body_dict)

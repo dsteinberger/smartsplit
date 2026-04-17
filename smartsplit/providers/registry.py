@@ -6,7 +6,8 @@ import asyncio
 import logging
 import re
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, TypeVar
 
 import httpx
 
@@ -17,6 +18,8 @@ from smartsplit.providers.base import BaseProvider, LLMProvider, SearchProvider
 if TYPE_CHECKING:
     from smartsplit.config import ProviderConfig
     from smartsplit.models import TokenUsage
+
+T = TypeVar("T")
 
 # Max prompt chars per context tier — controls how much context workers receive.
 # Smaller tiers save tokens for free-tier providers with tight rate limits.
@@ -33,7 +36,7 @@ _KEY_PATTERN = re.compile(r"(sk-ant-|sk-or-|sk-|gsk_|AIza|tvly_|srp_|csk-|dsk-|m
 
 # ── Circuit breaker ────────────────────────────────────────────
 
-_PROVIDER_CALL_TIMEOUT = 30  # seconds — max wait per provider call
+PROVIDER_CALL_TIMEOUT = 30  # seconds — max wait per provider call
 _CB_FAILURE_THRESHOLD = 5  # weighted failure points before marking unhealthy
 _CB_FAILURE_WINDOW = 120  # 2 minutes window
 _CB_BASE_TIMEOUT = 60  # base cooldown (seconds)
@@ -252,7 +255,65 @@ class ProviderRegistry:
         """Look up a provider by name."""
         return self._providers.get(name)
 
+    @property
+    def free_llm_priority(self) -> list[str]:
+        """Ordered list of free LLM provider names for fallback."""
+        return list(self._free_llm_priority)
+
+    @property
+    def http_client(self) -> httpx.AsyncClient:
+        """Shared HTTP client — for tools that need to reach arbitrary URLs (e.g. web_fetch)."""
+        return self._http
+
     # ── High-level helpers ───────────────────────────────────
+
+    def _brain_candidate_order(self) -> list[str]:
+        """Ordered fallback list starting with the configured brain."""
+        from smartsplit.config import _BRAIN_PRIORITY
+
+        order = [self.brain_name] if self.brain_name else []
+        order += [p for p in _BRAIN_PRIORITY if p != self.brain_name and p in self._providers]
+        return order
+
+    async def _call_with_brain_fallback(
+        self,
+        op_name: str,
+        call: Callable[[LLMProvider], Awaitable[T]],
+    ) -> T:
+        """Shared fallback loop for brain calls — honors circuit breaker, timeouts, and NotImplementedError."""
+        for name in self._brain_candidate_order():
+            provider = self._providers.get(name)
+            if provider is None or not isinstance(provider, LLMProvider):
+                continue
+            if not self.circuit_breaker.is_healthy(name):
+                logger.info("Skipping brain candidate %s — circuit breaker open", name)
+                continue
+            try:
+                async with asyncio.timeout(PROVIDER_CALL_TIMEOUT):
+                    result = await call(provider)
+                self.circuit_breaker.record_success(name)
+                if name == self.brain_name:
+                    logger.debug("Brain %r responded successfully (%s)", name, op_name)
+                else:
+                    logger.warning("Brain %r unavailable, used fallback: %s (%s)", self.brain_name, name, op_name)
+                return result
+            except NotImplementedError:
+                logger.debug("Provider %r does not support %s, skipping", name, op_name)
+                continue
+            except TimeoutError as e:
+                logger.warning("Brain candidate %r timed out after %ss (%s)", name, PROVIDER_CALL_TIMEOUT, op_name)
+                self.circuit_breaker.record_failure(name, e)
+            except Exception as e:
+                logger.warning(
+                    "Brain candidate %r failed: %s: %s (%s)",
+                    name,
+                    type(e).__name__,
+                    _sanitize_error(e),
+                    op_name,
+                )
+                self.circuit_breaker.record_failure(name, e)
+
+        raise NoProviderAvailableError("brain")
 
     async def call_brain(
         self,
@@ -264,35 +325,10 @@ class ProviderRegistry:
         The brain is the primary LLM that produces the final response.
         If the brain is down, falls back to the next best provider.
         """
-        from smartsplit.config import _BRAIN_PRIORITY
-
-        order = [self.brain_name] if self.brain_name else []
-        order += [p for p in _BRAIN_PRIORITY if p != self.brain_name and p in self._providers]
-
-        for name in order:
-            provider = self._providers.get(name)
-            if provider is None or not isinstance(provider, LLMProvider):
-                continue
-            if not self.circuit_breaker.is_healthy(name):
-                logger.info("Skipping brain candidate %s — circuit breaker open", name)
-                continue
-            try:
-                async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
-                    result, usage = await provider.complete(prompt, messages=messages)
-                self.circuit_breaker.record_success(name)
-                if name == self.brain_name:
-                    logger.debug("Brain %r responded successfully", name)
-                else:
-                    logger.warning("Brain %r unavailable, used fallback: %s", self.brain_name, name)
-                return result, usage
-            except TimeoutError as e:
-                logger.warning("Brain candidate %r timed out after %ss", name, _PROVIDER_CALL_TIMEOUT)
-                self.circuit_breaker.record_failure(name, e)
-            except Exception as e:
-                logger.warning("Brain candidate %r failed: %s: %s", name, type(e).__name__, _sanitize_error(e))
-                self.circuit_breaker.record_failure(name, e)
-
-        raise NoProviderAvailableError("brain")
+        return await self._call_with_brain_fallback(
+            "complete",
+            lambda provider: provider.complete(prompt, messages=messages),
+        )
 
     async def proxy_to_brain(self, body: dict) -> dict:
         """Forward a raw OpenAI-compatible request body to the brain and return the raw response.
@@ -301,34 +337,10 @@ class ProviderRegistry:
         for the agent loop. The body's messages may have been enriched by SmartSplit,
         but everything else (tools, stream, etc.) is passed through unchanged.
         """
-        from smartsplit.config import _BRAIN_PRIORITY
-
-        order = [self.brain_name] if self.brain_name else []
-        order += [p for p in _BRAIN_PRIORITY if p != self.brain_name and p in self._providers]
-
-        for name in order:
-            provider = self._providers.get(name)
-            if provider is None or not isinstance(provider, LLMProvider):
-                continue
-            if not self.circuit_breaker.is_healthy(name):
-                continue
-            try:
-                async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
-                    data = await provider.proxy_openai_request(body)
-                self.circuit_breaker.record_success(name)
-                logger.info("Proxied to brain %r successfully", name)
-                return data
-            except NotImplementedError:
-                logger.debug("Provider %r does not support agent-mode passthrough, skipping", name)
-                continue
-            except TimeoutError as e:
-                logger.warning("Brain proxy %r timed out", name)
-                self.circuit_breaker.record_failure(name, e)
-            except Exception as e:
-                logger.warning("Brain proxy %r failed: %s: %s", name, type(e).__name__, _sanitize_error(e))
-                self.circuit_breaker.record_failure(name, e)
-
-        raise NoProviderAvailableError("brain")
+        return await self._call_with_brain_fallback(
+            "proxy",
+            lambda provider: provider.proxy_openai_request(body),
+        )
 
     async def call_free_llm(self, prompt: str, prefer: str = "groq") -> str:
         """Try free LLMs in priority order, with brain as last-resort fallback."""
@@ -353,12 +365,12 @@ class ProviderRegistry:
             if len(prompt) > max_chars:
                 logger.debug("Truncated prompt for %s: %d → %d chars (tier %s)", name, len(prompt), max_chars, tier)
             try:
-                async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
+                async with asyncio.timeout(PROVIDER_CALL_TIMEOUT):
                     result, _usage = await provider.complete(truncated)
                 self.circuit_breaker.record_success(name)
                 return result
             except TimeoutError as e:
-                logger.warning("Free LLM %s timed out after %ss", name, _PROVIDER_CALL_TIMEOUT)
+                logger.warning("Free LLM %s timed out after %ss", name, PROVIDER_CALL_TIMEOUT)
                 self.circuit_breaker.record_failure(name, e)
             except Exception as e:
                 logger.warning("Free LLM %s failed: %s: %s", name, type(e).__name__, _sanitize_error(e))

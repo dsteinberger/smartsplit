@@ -33,7 +33,7 @@ _LONG_HISTORY_MESSAGES = 10
 _LONG_HISTORY_CHARS = 5000
 
 # Keywords that signal enrichment opportunities
-_COMPARISON_KEYWORDS = [
+_COMPARISON_KEYWORDS_BASE = [
     " vs ",
     " versus ",
     "compare",
@@ -44,7 +44,7 @@ _COMPARISON_KEYWORDS = [
     "tradeoff",
     "trade-off",
 ]
-_ANALYSIS_KEYWORDS = [
+_ANALYSIS_KEYWORDS_BASE = [
     "refactor",
     "review",
     "analyze",
@@ -56,13 +56,17 @@ _ANALYSIS_KEYWORDS = [
     "diagnose",
 ]
 
-# Merge multilingual keywords for comparison and analysis detection.
-for _kw_list in COMPARISON_KEYWORDS_I18N.values():
-    _COMPARISON_KEYWORDS.extend(_kw_list)
-_COMPARISON_KEYWORDS = list(dict.fromkeys(_COMPARISON_KEYWORDS))
-for _kw_list in ANALYSIS_KEYWORDS_I18N.values():
-    _ANALYSIS_KEYWORDS.extend(_kw_list)
-_ANALYSIS_KEYWORDS = list(dict.fromkeys(_ANALYSIS_KEYWORDS))
+
+def _merge_i18n_keywords(base: list[str], i18n: dict[str, list[str]]) -> list[str]:
+    """Flatten multilingual keyword lists onto the base, deduplicated while preserving order."""
+    merged = list(base)
+    for lang_kws in i18n.values():
+        merged.extend(lang_kws)
+    return list(dict.fromkeys(merged))
+
+
+_COMPARISON_KEYWORDS = _merge_i18n_keywords(_COMPARISON_KEYWORDS_BASE, COMPARISON_KEYWORDS_I18N)
+_ANALYSIS_KEYWORDS = _merge_i18n_keywords(_ANALYSIS_KEYWORDS_BASE, ANALYSIS_KEYWORDS_I18N)
 
 
 class TriageDecision(StrEnum):
@@ -144,7 +148,7 @@ def detect(
 
 
 # Minimum prompt length to justify an LLM classification call
-_LLM_DETECT_MIN_CHARS = 40
+LLM_DETECT_MIN_CHARS = 40
 
 _TRIAGE_PROMPT = """\
 You are a request triage engine. Decide if the user's prompt needs external enrichment.

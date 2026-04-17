@@ -30,7 +30,7 @@ from smartsplit.tools.anticipation import (
     inject_anticipated_context,
 )
 from smartsplit.triage.detector import TriageDecision, detect
-from smartsplit.triage.enrichment import _extract_project_context
+from smartsplit.triage.enrichment import extract_project_context
 
 # ── Format tests ───────────────────────────────────────────────
 
@@ -478,24 +478,24 @@ class TestAgentMode:
         result = inject_anticipated_context(original, [])
         assert result is original  # same reference, no copy
 
-    # ── _extract_project_context ─────────────────────────────
+    # ── extract_project_context ─────────────────────────────
 
-    def test_extract_project_context_from_system(self):
+    def testextract_project_context_from_system(self):
         messages = [
             {"role": "system", "content": "You are a helpful coding assistant for this Python project."},
             {"role": "user", "content": "Help me"},
         ]
-        ctx = _extract_project_context(messages)
+        ctx = extract_project_context(messages)
         assert "PROJECT CONTEXT" in ctx
         assert "You are a helpful coding assistant" in ctx
         # Truncated to 500 chars max
         assert len(ctx) < 600
 
-    def test_extract_project_context_no_system(self):
+    def testextract_project_context_no_system(self):
         messages = [
             {"role": "user", "content": "Hello"},
         ]
-        ctx = _extract_project_context(messages)
+        ctx = extract_project_context(messages)
         assert ctx == ""
 
     # ── response_to_sse_chunks (text) ───────────────────────
