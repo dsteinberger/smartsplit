@@ -443,3 +443,32 @@ class TestEnrichmentBackoff:
         # Verify the enrichment was injected into the last user message
         last_user = result["body"]["messages"][-1]
         assert "Python 3.13 info here" in str(last_user["content"])
+
+
+class TestExtractSearchQuery:
+    """Covers _extract_search_query, in particular the ctx.last_search_query store path."""
+
+    @pytest.mark.asyncio
+    async def test_store_on_ctx_writes_refined_query(self):
+        """When store_on_ctx=True and the free LLM returns a JSON array, the refined query lands on ctx."""
+        from smartsplit.triage.enrichment import _extract_search_query
+
+        ctx = MagicMock()
+        ctx.last_search_query = ""
+        ctx.registry = MagicMock()
+        ctx.registry.call_free_llm = AsyncMock(return_value='["python 3.13 release notes"]')
+
+        refined = await _extract_search_query(ctx, "What's new in Python 3.13?", None, store_on_ctx=True)
+        assert refined == "python 3.13 release notes"
+        assert ctx.last_search_query == "python 3.13 release notes"
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_returns_raw_prompt(self):
+        from smartsplit.triage.enrichment import _extract_search_query
+
+        ctx = MagicMock()
+        ctx.registry = MagicMock()
+        ctx.registry.call_free_llm = AsyncMock(side_effect=RuntimeError("llm down"))
+
+        refined = await _extract_search_query(ctx, "raw prompt", None)
+        assert refined == "raw prompt"

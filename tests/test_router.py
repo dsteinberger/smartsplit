@@ -527,3 +527,124 @@ class TestProviderOverrides:
         """Config without overrides should have empty dict."""
         config = make_config(["groq"])
         assert config.overrides == {}
+
+
+# ── Fast-model retry, context errors, refusal check ──────────
+
+
+class TestFastModelRetryAndContextErrors:
+    @pytest.mark.asyncio
+    async def test_strong_fails_fast_succeeds(self, make_config, tmp_path):
+        """Strong model throws ProviderError → router retries the fast model on the same provider."""
+        config = make_config(["anthropic"], mode=Mode.QUALITY)
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        provider = registry.get("anthropic")
+        strong_model = config.providers["anthropic"].strong_model or "claude-sonnet-4-6-20250514"
+        provider.config.strong_model = strong_model
+        provider.config.fast_model = "claude-haiku-fast"
+
+        def _mock_complete(prompt, model=None, messages=None, **_kw):
+            if model == strong_model:
+                raise ProviderError("anthropic", "boom")
+            return (
+                "fast model rescue that is long enough to pass quality gate",
+                TokenUsage(prompt_tokens=1, completion_tokens=2),
+            )
+
+        provider.complete = AsyncMock(side_effect=_mock_complete)
+        subtask = Subtask(type=TaskType.CODE, content="write code", complexity=Complexity.HIGH)
+        result = await router.route(subtask, mode=Mode.QUALITY)
+        assert result.provider == "anthropic"
+        assert "fast model rescue" in result.response
+
+    @pytest.mark.asyncio
+    async def test_strong_and_fast_both_fail(self, make_config, tmp_path):
+        """Strong AND fast model fail → provider marked failed, circuit breaker records failure."""
+        config = make_config(["anthropic", "groq"], mode=Mode.QUALITY)
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        anthropic = registry.get("anthropic")
+        anthropic.config.strong_model = "claude-sonnet-4-6-20250514"
+        anthropic.config.fast_model = "claude-haiku-fast"
+        anthropic.complete = AsyncMock(side_effect=ProviderError("anthropic", "down"))
+
+        groq = registry.get("groq")
+        groq.complete = AsyncMock(
+            return_value=("groq fallback response long enough to pass quality gate", TokenUsage())
+        )
+
+        subtask = Subtask(type=TaskType.CODE, content="write code", complexity=Complexity.HIGH)
+        result = await router.route(subtask, mode=Mode.QUALITY)
+        assert result.provider == "groq"
+
+    @pytest.mark.asyncio
+    async def test_context_too_long_does_not_penalize(self, make_config, tmp_path):
+        """`context length exceeded` → try next provider, do NOT record circuit-breaker failure."""
+        config = make_config(["groq", "gemini"])
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Gemini is scored higher for reasoning → tried first. Make it fail on context, groq succeeds.
+        gemini = registry.get("gemini")
+        gemini.complete = AsyncMock(side_effect=ProviderError("gemini", "context length exceeded"))
+        groq = registry.get("groq")
+        long_response = "A proper reasoning answer " + ("x" * 400)
+        groq.complete = AsyncMock(return_value=(long_response, TokenUsage()))
+
+        subtask = Subtask(type=TaskType.REASONING, content="big prompt", complexity=Complexity.LOW)
+        result = await router.route(subtask)
+        assert result.provider == "groq"
+        # Context error should NOT trip the breaker for gemini
+        assert registry.circuit_breaker.is_healthy("gemini")
+        assert any(e.reason == "context_too_long" for e in result.escalations)
+
+    @pytest.mark.asyncio
+    async def test_refusal_check_escalates(self, make_config, tmp_path):
+        """LLM refusal detected on a mid-length response → escalate to next provider."""
+        config = make_config(["groq", "gemini"])
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Response in the 50-300 char window that passes pattern check but is a refusal
+        ambiguous = "Ok, here is something: actually I am not going to complete that particular task"
+        registry.get("groq").complete = AsyncMock(return_value=(ambiguous, TokenUsage()))
+        registry.get("gemini").complete = AsyncMock(
+            return_value=("A proper answer that clearly passes the quality gate and is long enough", TokenUsage())
+        )
+        # Force LLM refusal check to return True for groq's response
+        registry.call_free_llm = AsyncMock(return_value="yes")
+
+        subtask = Subtask(type=TaskType.REASONING, content="explain recursion", complexity=Complexity.MEDIUM)
+        result = await router.route(subtask)
+        assert result.provider == "gemini"
+        assert any(e.reason == "llm_refusal_check" for e in result.escalations)
+
+    @pytest.mark.asyncio
+    async def test_messages_are_rewritten_with_enriched_content(self, make_config, tmp_path):
+        """When a subtask carries messages, the router overwrites the last user message with subtask.content."""
+        config = make_config(["groq"])
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Response > 300 chars so the refusal-check LLM path is skipped (otherwise
+        # call_args would capture the refusal-check call, not the routing call).
+        long_response = "A detailed reasoning answer " + ("x" * 400)
+        mock = AsyncMock(return_value=(long_response, TokenUsage()))
+        registry.get("groq").complete = mock
+
+        subtask = Subtask(
+            type=TaskType.REASONING,
+            content="ENRICHED content",
+            complexity=Complexity.LOW,
+            messages=[{"role": "user", "content": "original user prompt"}],
+        )
+        await router.route(subtask)
+        assert mock.call_args.kwargs["messages"][-1] == {"role": "user", "content": "ENRICHED content"}

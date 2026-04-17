@@ -696,6 +696,26 @@ class TestConvertToAnthropic:
         assert msg["content"][0]["type"] == "tool_use"
         assert msg["content"][0]["input"] == {"path": "/tmp/test.txt"}
 
+    def test_assistant_tool_calls_with_invalid_json_arguments(self):
+        """Malformed JSON in tool arguments should yield empty input, not crash."""
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "t1",
+                            "type": "function",
+                            "function": {"name": "Read", "arguments": "{not-json"},
+                        }
+                    ],
+                }
+            ],
+        }
+        result = _convert_to_anthropic(body, "claude-3-opus")
+        assert result["messages"][0]["content"][0]["input"] == {}
+
 
 class TestConvertFromAnthropic:
     """Tests for _convert_from_anthropic (lines 148-192)."""
@@ -1046,3 +1066,41 @@ class TestProxyToBrain:
         body = {"messages": [{"role": "user", "content": "test"}]}
         result = await registry.proxy_to_brain(body)
         assert result["choices"][0]["message"]["content"] == "gemini ok"
+
+    @pytest.mark.asyncio
+    async def test_proxy_to_brain_skips_provider_without_passthrough_support(self, make_config):
+        """Provider raising NotImplementedError from proxy_openai_request → skip to next candidate."""
+        config = make_config(["groq", "gemini"])
+        mock_http = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"choices": [{"message": {"content": "gemini ok"}}]}
+        mock_http.post = AsyncMock(return_value=mock_response)
+        registry = ProviderRegistry(config.providers, mock_http, brain_name="groq")
+
+        groq = registry.get("groq")
+        groq.proxy_openai_request = AsyncMock(side_effect=NotImplementedError)
+
+        body = {"messages": [{"role": "user", "content": "test"}]}
+        result = await registry.proxy_to_brain(body)
+        assert result["choices"][0]["message"]["content"] == "gemini ok"
+
+
+class TestRegistryProperties:
+    """Public accessors added in the audit batch."""
+
+    def test_free_llm_priority_is_a_defensive_copy(self, make_config):
+        config = make_config(["groq", "gemini"])
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient(), free_llm_priority=["groq", "gemini"])
+        priority = registry.free_llm_priority
+        assert priority == ["groq", "gemini"]
+        priority.append("mistral")
+        # Internal priority must not mutate
+        assert registry.free_llm_priority == ["groq", "gemini"]
+
+    def test_http_client_exposes_shared_client(self, make_config):
+        config = make_config(["groq"])
+        http = httpx.AsyncClient()
+        registry = ProviderRegistry(config.providers, http)
+        assert registry.http_client is http
