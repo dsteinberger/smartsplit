@@ -9,6 +9,7 @@ Weights vary by mode (economy favors cost, quality favors quality).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import httpx
@@ -27,6 +28,34 @@ from smartsplit.models import (
 )
 from smartsplit.providers.base import SearchProvider
 from smartsplit.routing.quota import estimate_tokens
+
+_CONTEXT_ERROR_MARKERS = ("context length", "context_length", "max_tokens", "too long", "token limit")
+
+
+@dataclass
+class _RouteState:
+    """Mutable state accumulated across provider attempts within a single route() call."""
+
+    subtask: Subtask
+    mode: Mode
+    is_search: bool
+    use_quality_gate: bool
+    tokens_est: int
+    escalations: list[EscalationRecord] = field(default_factory=list)
+    fallback: tuple[str, str, float] | None = None  # (response, provider, score)
+    pending_failure: tuple[str, str] | None = None  # (provider, reason)
+
+
+@dataclass(frozen=True)
+class _CallContext:
+    """Resolved parameters for a single provider call."""
+
+    bandit_key: str
+    tier: str
+    model: str | None
+    pconfig: ProviderConfig | None
+    messages: list[dict[str, str]] | None
+
 
 if TYPE_CHECKING:
     from smartsplit.config import ProviderConfig, SmartSplitConfig
@@ -376,22 +405,207 @@ class Router:
         candidates.sort(key=lambda c: c[1], reverse=True)
         return candidates
 
+    def _build_messages_for_call(self, subtask: Subtask) -> list[dict[str, str]] | None:
+        """Shallow-copy ``subtask.messages`` and overwrite the last user content.
+
+        The enriched content (context injection, search results) lives in ``subtask.content``.
+        """
+        if not subtask.messages:
+            return None
+        messages = [dict(m) for m in subtask.messages]
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == "user":
+                messages[i] = {"role": "user", "content": subtask.content}
+                break
+        return messages
+
+    def _prepare_call_context(self, provider_name: str, subtask: Subtask, mode: Mode) -> _CallContext:
+        """Resolve tier, model, bandit key, and prepared messages for an LLM call."""
+        pconfig = self._config.providers.get(provider_name)
+        tier = _resolve_tier(pconfig, subtask.complexity, mode)
+        bandit_key = f"{provider_name}:{tier}" if pconfig and pconfig.type == ProviderType.PAID else provider_name
+        model = _get_model_for_tier(pconfig, tier)
+        return _CallContext(
+            bandit_key=bandit_key,
+            tier=tier,
+            model=model,
+            pconfig=pconfig,
+            messages=self._build_messages_for_call(subtask),
+        )
+
+    async def _execute_call(
+        self,
+        provider_name: str,
+        subtask: Subtask,
+        state: _RouteState,
+        call_ctx: _CallContext,
+    ) -> tuple[str, TokenUsage]:
+        """Execute a search or LLM call using the prepared ``call_ctx``."""
+        if state.is_search:
+            response = await self._registry.call_search(provider_name, subtask.content)
+            return response, TokenUsage()
+        if call_ctx.model:
+            logger.info("  Using %s model: %s", call_ctx.tier, call_ctx.model)
+        response, usage = await self._registry.call_llm(
+            provider_name, subtask.content, model=call_ctx.model, messages=call_ctx.messages
+        )
+        return response, usage
+
+    def _build_call_ctx_for_state(self, provider_name: str, subtask: Subtask, state: _RouteState) -> _CallContext:
+        """Pick between search and LLM call context depending on state."""
+        if state.is_search:
+            return _CallContext(bandit_key=provider_name, tier="search", model=None, pconfig=None, messages=None)
+        return self._prepare_call_context(provider_name, subtask, state.mode)
+
+    def _record_quota(self, provider_name: str, subtask: Subtask, pconfig: ProviderConfig | None) -> None:
+        is_paid = pconfig.type == ProviderType.PAID if pconfig else False
+        self._quota.record_usage(provider_name, subtask.type.value, is_paid=is_paid, prompt=subtask.content)
+
+    def _remember_fallback(self, state: _RouteState, provider_name: str, response: str, score: float) -> None:
+        """Keep the first (highest-scored) response as the quality-gate fallback."""
+        if state.fallback is None:
+            state.fallback = (response, provider_name, score)
+
+    def _mark_failure(self, state: _RouteState, provider_name: str, reason: str) -> None:
+        state.pending_failure = (provider_name, reason)
+
+    async def _passes_refusal_check(self, response: str, use_quality_gate: bool) -> bool:
+        """Return True if no refusal is detected — cheap short-circuits first."""
+        if not use_quality_gate:
+            return True
+        stripped_len = len(response.strip())
+        if not (_MIN_LLM_CHECK_LEN <= stripped_len <= _MAX_LLM_CHECK_LEN):
+            return True
+        return not await self._check_refusal_llm(response)
+
+    async def _try_fast_model_retry(
+        self,
+        provider_name: str,
+        provider_score: float,
+        subtask: Subtask,
+        state: _RouteState,
+        call_ctx: _CallContext,
+    ) -> RouteResult | None:
+        """Retry the same provider with its fast model after a strong-model failure."""
+        pcfg = call_ctx.pconfig
+        if state.is_search or not call_ctx.model or pcfg is None or not pcfg.fast_model:
+            return None
+        if call_ctx.model == pcfg.fast_model:
+            return None
+        try:
+            logger.info("  Retrying %s with fast model: %s", provider_name, pcfg.fast_model)
+            response, fast_usage = await self._registry.call_llm(
+                provider_name, subtask.content, model=pcfg.fast_model, messages=call_ctx.messages
+            )
+        except (ProviderError, httpx.HTTPError, TimeoutError) as exc:
+            logger.warning("  %s fast model also failed: %s", provider_name, type(exc).__name__)
+            return None
+
+        self._registry.circuit_breaker.record_success(provider_name)
+        if self._bandit:
+            self._bandit.record(subtask.type.value, f"{provider_name}:fast", success=True)
+        self._record_quota(provider_name, subtask, pcfg)
+        return self._build_success_result(subtask, state, provider_name, provider_score, response, fast_usage)
+
+    def _build_success_result(
+        self,
+        subtask: Subtask,
+        state: _RouteState,
+        provider_name: str,
+        provider_score: float,
+        response: str,
+        usage: TokenUsage,
+    ) -> RouteResult:
+        termination = TerminationState.ESCALATED if state.escalations else TerminationState.COMPLETED
+        return RouteResult(
+            type=subtask.type,
+            response=response,
+            provider=provider_name,
+            score=provider_score,
+            termination=termination,
+            escalations=list(state.escalations),
+            estimated_tokens=state.tokens_est,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+        )
+
+    @staticmethod
+    def _is_context_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(p in msg for p in _CONTEXT_ERROR_MARKERS)
+
+    async def _attempt_one(
+        self,
+        provider_name: str,
+        provider_score: float,
+        subtask: Subtask,
+        state: _RouteState,
+    ) -> RouteResult | None:
+        """Try a single provider. Returns a RouteResult on success, else mutates state and returns None."""
+        logger.info("Routing [%s] -> %s (score=%.3f)", subtask.type, provider_name, provider_score)
+        call_ctx = self._build_call_ctx_for_state(provider_name, subtask, state)
+
+        try:
+            response, usage = await self._execute_call(provider_name, subtask, state, call_ctx)
+            logger.debug("  %s response: %r", provider_name, response[:150])
+            self._record_quota(provider_name, subtask, call_ctx.pconfig)
+        except (ProviderError, httpx.HTTPError, TimeoutError) as exc:
+            if self._is_context_error(exc):
+                logger.info("  %s context too long, trying next provider", provider_name)
+                self._mark_failure(state, provider_name, "context_too_long")
+                return None
+            logger.warning("  %s failed: %s", provider_name, type(exc).__name__)
+            retry = await self._try_fast_model_retry(provider_name, provider_score, subtask, state, call_ctx)
+            if retry is not None:
+                return retry
+            self._registry.circuit_breaker.record_failure(provider_name)
+            if self._bandit:
+                self._bandit.record(subtask.type.value, call_ctx.bandit_key, success=False)
+            self._mark_failure(state, provider_name, "provider_error")
+            return None
+
+        if state.use_quality_gate:
+            gate_reject = self.quality_gate_reason(response, subtask)
+            if gate_reject:
+                logger.warning("  %s failed quality gate: %s, escalating", provider_name, gate_reject)
+                if self._bandit:
+                    self._bandit.record(subtask.type.value, call_ctx.bandit_key, success=False)
+                self._remember_fallback(state, provider_name, response, provider_score)
+                self._mark_failure(state, provider_name, "quality_gate")
+                return None
+
+        if not await self._passes_refusal_check(response, state.use_quality_gate):
+            logger.warning("  %s LLM detected refusal, escalating", provider_name)
+            if self._bandit:
+                self._bandit.record(subtask.type.value, call_ctx.bandit_key, success=False)
+            self._remember_fallback(state, provider_name, response, provider_score)
+            self._mark_failure(state, provider_name, "llm_refusal_check")
+            return None
+
+        self._registry.circuit_breaker.record_success(provider_name)
+        if self._bandit:
+            self._bandit.record(subtask.type.value, call_ctx.bandit_key, success=True)
+        return self._build_success_result(subtask, state, provider_name, provider_score, response, usage)
+
     async def route(self, subtask: Subtask, mode: Mode | None = None) -> RouteResult:
         """Find the best provider for *subtask* and execute the call."""
-        mode = mode or self._config.mode
-        is_search = subtask.type == TaskType.WEB_SEARCH
-        use_quality_gate = mode in _QUALITY_GATE_MODES
-        tokens_est = estimate_tokens(subtask.content)
-        escalations: list[EscalationRecord] = []
+        effective_mode = mode or self._config.mode
+        state = _RouteState(
+            subtask=subtask,
+            mode=effective_mode,
+            is_search=subtask.type == TaskType.WEB_SEARCH,
+            use_quality_gate=effective_mode in _QUALITY_GATE_MODES,
+            tokens_est=estimate_tokens(subtask.content),
+        )
 
         override_name = self._resolve_override(subtask.type.value)
-        candidates = self._build_candidates(subtask, mode, is_search)
+        candidates = self._build_candidates(subtask, effective_mode, state.is_search)
 
         if candidates and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "Scores for [%s] (%s): %s",
                 subtask.type.value,
-                mode,
+                effective_mode,
                 ", ".join(f"{n}={s:.3f}" for n, s in candidates),
             )
 
@@ -407,182 +621,32 @@ class Router:
                 response=f"No provider available for [{subtask.type.value}]. {hint}",
                 provider="none",
                 termination=TerminationState.NO_PROVIDER,
-                estimated_tokens=tokens_est,
+                estimated_tokens=state.tokens_est,
             )
 
-        # Try candidates in score order, with quality gate escalation
-        last_response: str | None = None
-        last_response_provider: str | None = None
-        last_response_score: float = 0.0
-        model: str | None = None
-        prov_cfg = None
-        messages: list[dict[str, str]] | None = None
-        bandit_key: str = ""
-        failed_provider: str | None = None
-        failed_reason: str | None = None
         for provider_name, provider_score in candidates:
-            # Record escalation from previous failed provider to this one
-            if failed_provider is not None:
-                escalations.append(
-                    EscalationRecord(
-                        from_provider=failed_provider,
-                        to_provider=provider_name,
-                        reason=failed_reason or "unknown",
-                    )
+            if state.pending_failure is not None:
+                failed_provider, failed_reason = state.pending_failure
+                state.escalations.append(
+                    EscalationRecord(from_provider=failed_provider, to_provider=provider_name, reason=failed_reason)
                 )
-                failed_provider = None
-                failed_reason = None
+                state.pending_failure = None
 
-            try:
-                logger.info("Routing [%s] -> %s (score=%.3f)", subtask.type, provider_name, provider_score)
+            result = await self._attempt_one(provider_name, provider_score, subtask, state)
+            if result is not None:
+                return result
 
-                usage = TokenUsage()
-                if is_search:
-                    bandit_key = provider_name
-                    response = await self._registry.call_search(provider_name, subtask.content)
-                else:
-                    prov_cfg = self._config.providers.get(provider_name)
-                    tier = _resolve_tier(prov_cfg, subtask.complexity, mode)
-                    bandit_key = (
-                        f"{provider_name}:{tier}" if prov_cfg and prov_cfg.type == ProviderType.PAID else provider_name
-                    )
-                    model = _get_model_for_tier(prov_cfg, tier)
-                    if model:
-                        logger.info("  Using %s model: %s", tier, model)
-                    # If subtask has conversation messages, update the last user message
-                    # with the enriched content (context injection, enrichment, etc.)
-                    messages = subtask.messages
-                    if messages:
-                        messages = [dict(m) for m in messages]  # shallow copy
-                        for i in range(len(messages) - 1, -1, -1):
-                            if messages[i]["role"] == "user":
-                                messages[i] = {"role": "user", "content": subtask.content}
-                                break
-                    response, usage = await self._registry.call_llm(
-                        provider_name, subtask.content, model=model, messages=messages
-                    )
-
-                logger.debug("  %s response: %r", provider_name, response[:150])
-
-                prov_cfg = self._config.providers.get(provider_name)
-                is_paid = prov_cfg.type == ProviderType.PAID if prov_cfg else False
-                self._quota.record_usage(
-                    provider_name,
-                    subtask.type.value,
-                    is_paid=is_paid,
-                    prompt=subtask.content,
-                )
-
-                # Quality gate: if response is low-quality, try next provider
-                gate_reject = self.quality_gate_reason(response, subtask) if use_quality_gate else None
-                if gate_reject:
-                    logger.warning("  %s failed quality gate: %s, escalating", provider_name, gate_reject)
-                    if self._bandit:
-                        self._bandit.record(subtask.type.value, bandit_key, success=False)
-                    # Keep the first (highest-scored) response as fallback
-                    if last_response is None:
-                        last_response = response
-                        last_response_provider = provider_name
-                        last_response_score = provider_score
-                    failed_provider = provider_name
-                    failed_reason = "quality_gate"
-                    continue
-
-                # LLM refusal check — only for suspicious short responses (50-300 chars)
-                # that passed pattern matching. Catches multilingual refusals.
-                resp_len = len(response.strip())
-                if use_quality_gate and _MIN_LLM_CHECK_LEN <= resp_len <= _MAX_LLM_CHECK_LEN:
-                    is_refusal = await self._check_refusal_llm(response)
-                    if is_refusal:
-                        logger.warning("  %s LLM detected refusal, escalating", provider_name)
-                        if self._bandit:
-                            self._bandit.record(subtask.type.value, bandit_key, success=False)
-                        if last_response is None:
-                            last_response = response
-                            last_response_provider = provider_name
-                            last_response_score = provider_score
-                        failed_provider = provider_name
-                        failed_reason = "llm_refusal_check"
-                        continue
-
-                self._registry.circuit_breaker.record_success(provider_name)
-                if self._bandit:
-                    self._bandit.record(subtask.type.value, bandit_key, success=True)
-                termination = TerminationState.ESCALATED if escalations else TerminationState.COMPLETED
-                return RouteResult(
-                    type=subtask.type,
-                    response=response,
-                    provider=provider_name,
-                    score=provider_score,
-                    termination=termination,
-                    escalations=escalations,
-                    estimated_tokens=tokens_est,
-                    prompt_tokens=usage.prompt_tokens,
-                    completion_tokens=usage.completion_tokens,
-                )
-            except (ProviderError, httpx.HTTPError, TimeoutError) as e:
-                error_msg = str(e).lower()
-                is_context_error = any(
-                    p in error_msg
-                    for p in ("context length", "context_length", "max_tokens", "too long", "token limit")
-                )
-                if is_context_error:
-                    # Context too long — not the provider's fault, don't penalize
-                    logger.info("  %s context too long, trying next provider", provider_name)
-                    failed_provider = provider_name
-                    failed_reason = "context_too_long"
-                    continue
-                logger.warning("  %s failed: %s", provider_name, type(e).__name__)
-                # If strong model failed, retry with fast model on same provider
-                if not is_search and model and prov_cfg and prov_cfg.fast_model and model != prov_cfg.fast_model:
-                    try:
-                        logger.info("  Retrying %s with fast model: %s", provider_name, prov_cfg.fast_model)
-                        response, fast_usage = await self._registry.call_llm(
-                            provider_name,
-                            subtask.content,
-                            model=prov_cfg.fast_model,
-                            messages=messages,
-                        )
-                        self._registry.circuit_breaker.record_success(provider_name)
-                        if self._bandit:
-                            self._bandit.record(subtask.type.value, f"{provider_name}:fast", success=True)
-                        self._quota.record_usage(
-                            provider_name,
-                            subtask.type.value,
-                            is_paid=prov_cfg.type == ProviderType.PAID,
-                            prompt=subtask.content,
-                        )
-                        termination = TerminationState.ESCALATED if escalations else TerminationState.COMPLETED
-                        return RouteResult(
-                            type=subtask.type,
-                            response=response,
-                            provider=provider_name,
-                            score=provider_score,
-                            termination=termination,
-                            escalations=escalations,
-                            estimated_tokens=tokens_est,
-                            prompt_tokens=fast_usage.prompt_tokens,
-                            completion_tokens=fast_usage.completion_tokens,
-                        )
-                    except (ProviderError, httpx.HTTPError, TimeoutError) as e2:
-                        logger.warning("  %s fast model also failed: %s", provider_name, type(e2).__name__)
-                self._registry.circuit_breaker.record_failure(provider_name)
-                if self._bandit:
-                    self._bandit.record(subtask.type.value, bandit_key, success=False)
-                failed_provider = provider_name
-                failed_reason = "provider_error"
-
-        # If we have a low-quality response, return it rather than nothing
-        if last_response is not None and last_response_provider is not None:
+        if state.fallback is not None:
             logger.warning("All providers failed quality gate, returning best available")
+            response, provider, score = state.fallback
             return RouteResult(
                 type=subtask.type,
-                response=last_response,
-                provider=last_response_provider,
-                score=last_response_score,
+                response=response,
+                provider=provider,
+                score=score,
                 termination=TerminationState.QUALITY_GATE_FALLBACK,
-                escalations=escalations,
-                estimated_tokens=tokens_est,
+                escalations=list(state.escalations),
+                estimated_tokens=state.tokens_est,
             )
 
         return RouteResult(
@@ -590,6 +654,6 @@ class Router:
             response=f"All providers failed for [{subtask.type.value}]. Check your API keys and provider status.",
             provider="none",
             termination=TerminationState.ALL_FAILED,
-            escalations=escalations,
-            estimated_tokens=tokens_est,
+            escalations=list(state.escalations),
+            estimated_tokens=state.tokens_est,
         )

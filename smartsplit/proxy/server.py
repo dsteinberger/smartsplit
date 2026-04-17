@@ -464,6 +464,27 @@ async def _handle_connect(
         await _tunnel_blind(reader, writer, host, port)
 
 
+def _rebind_stream_transport(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    new_transport: asyncio.BaseTransport,
+) -> None:
+    """Swap the transport under an existing ``StreamReader``/``StreamWriter`` after ``start_tls``.
+
+    ``asyncio.StreamWriter`` / ``StreamReader`` do not expose a public API to rebind
+    their underlying transport. After ``loop.start_tls``, the original transport is
+    detached and a new TLS transport takes its place — the streams still reference
+    the stale one, so we patch them directly.
+
+    Isolated here so the private attribute access stays in one obvious spot. This
+    pattern is documented in cpython issues #79780 / #86727 and is the workaround
+    used by popular proxies (mitmproxy, aiohttp server) until asyncio provides a
+    public upgrade API.
+    """
+    writer._transport = new_transport
+    reader._transport = new_transport
+
+
 async def _do_client_tls_handshake(
     ca_key: object, ca_cert: object, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str
 ) -> bool:
@@ -472,9 +493,9 @@ async def _do_client_tls_handshake(
     try:
         loop = asyncio.get_event_loop()
         transport = writer.transport
-        new_transport = await loop.start_tls(transport, writer._protocol, ssl_ctx, server_side=True)
-        writer._transport = new_transport
-        reader._transport = new_transport
+        protocol = writer._protocol
+        new_transport = await loop.start_tls(transport, protocol, ssl_ctx, server_side=True)
+        _rebind_stream_transport(reader, writer, new_transport)
         return True
     except Exception as exc:
         logger.debug("TLS handshake failed (client) for %s: %s", host, exc)
