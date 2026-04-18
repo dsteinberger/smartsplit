@@ -231,7 +231,7 @@ class TestProcessAnthropicRequestLite:
         pattern_learner.observe_outcome = MagicMock()
 
         ctx = _make_ctx(detector=detector, pattern_learner=pattern_learner)
-        ctx.registry.call_free_llm = AsyncMock()
+        ctx.registry.call_worker_llm = AsyncMock()
 
         body = {
             "system": "Summarize the conversation below.",
@@ -244,7 +244,7 @@ class TestProcessAnthropicRequestLite:
         assert action["type"] == "passthrough"
         detector.predict.assert_not_awaited()
         pattern_learner.observe_outcome.assert_not_called()
-        ctx.registry.call_free_llm.assert_not_awaited()
+        ctx.registry.call_worker_llm.assert_not_awaited()
 
 
 # ── process_anthropic_request ────────────────────────────────

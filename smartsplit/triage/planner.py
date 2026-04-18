@@ -3,7 +3,7 @@
 Pipeline:
 1. **Domain Detection** — classify which competency domains the prompt touches.
 2. **Routing Decision** — 1 domain = route direct; 2+ domains = decompose.
-3. **Decomposition** — split along domain boundaries via free LLM.
+3. **Decomposition** — split along domain boundaries via worker LLM.
 4. **Context Injection** — attach a shared context summary to each subtask.
 5. **Limit Enforcement** — cap subtask count per mode (economy=3, balanced=5, quality=8).
 6. **Synthesis** — combine subtask results into a coherent response.
@@ -424,7 +424,7 @@ class Planner:
         Returns a list of domain name strings ordered by relevance.
         """
         try:
-            raw = await self._registry.call_free_llm(
+            raw = await self._registry.call_worker_llm(
                 _CLASSIFY_PROMPT + prompt + "\n--- END PROMPT ---",
                 prefer="groq",
             )
@@ -475,7 +475,7 @@ class Planner:
             + "\n--- END USER PROMPT ---"
         )
 
-        raw = await self._registry.call_free_llm(decompose_prompt, prefer="groq")
+        raw = await self._registry.call_worker_llm(decompose_prompt, prefer="groq")
         parsed = json.loads(extract_json(raw))
         if isinstance(parsed, dict):
             parsed = [parsed]
@@ -589,14 +589,14 @@ class Planner:
     async def _generate_context_summary(
         self, original_prompt: str, messages: list[dict[str, str]] | None
     ) -> str | None:
-        """Call the free LLM for a shared context summary, or ``None`` if it's unusable."""
+        """Call the worker LLM for a shared context summary, or ``None`` if it's unusable."""
         if messages and len(messages) > 1:
             conversation = "\n".join(f"[{m['role']}]: {m['content'][:200]}" for m in messages)
             context_input = f"Conversation:\n{conversation}\n\nLatest prompt: {original_prompt}"
         else:
             context_input = original_prompt
 
-        raw = await self._registry.call_free_llm(_CONTEXT_SUMMARY_TEMPLATE + context_input, prefer="groq")
+        raw = await self._registry.call_worker_llm(_CONTEXT_SUMMARY_TEMPLATE + context_input, prefer="groq")
         summary = raw.strip()
         if not summary:
             logger.warning("Context injection skipped: empty summary from LLM")
@@ -617,7 +617,7 @@ class Planner:
                 f"Subtask results:\n{results_text}\n\n"
                 "Provide a clear, unified response. Do not mention subtasks or routing."
             )
-            return await self._registry.call_free_llm(
+            return await self._registry.call_worker_llm(
                 synth_prompt,
                 prefer="groq",
             )

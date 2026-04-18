@@ -117,15 +117,15 @@ class TestRegistryInit:
         assert len(registry.get_all()) == 0
 
 
-# ── Free LLM fallback ───────────────────────────────────────
+# ── Worker LLM fallback ─────────────────────────────────────
 
 
-class TestCallFreeLLM:
+class TestCallWorkerLLM:
     @pytest.mark.asyncio
     async def test_prefers_specified(self, make_registry):
         registry = make_registry(["groq", "gemini"])
         registry.get("gemini").complete = AsyncMock(return_value=("gemini ok", TokenUsage()))
-        result = await registry.call_free_llm("test", prefer="gemini")
+        result = await registry.call_worker_llm("test", prefer="gemini")
         assert result == "gemini ok"
 
     @pytest.mark.asyncio
@@ -133,7 +133,7 @@ class TestCallFreeLLM:
         registry = make_registry(["groq", "gemini"])
         registry.get("groq").complete = AsyncMock(side_effect=Exception("down"))
         registry.get("gemini").complete = AsyncMock(return_value=("gemini fallback", TokenUsage()))
-        result = await registry.call_free_llm("test", prefer="groq")
+        result = await registry.call_worker_llm("test", prefer="groq")
         assert result == "gemini fallback"
 
     @pytest.mark.asyncio
@@ -141,7 +141,7 @@ class TestCallFreeLLM:
         registry = make_registry(["groq"])
         registry.get("groq").complete = AsyncMock(side_effect=Exception("down"))
         with pytest.raises(NoProviderAvailableError):
-            await registry.call_free_llm("test")
+            await registry.call_worker_llm("test")
 
     @pytest.mark.asyncio
     async def test_brain_as_last_resort_fallback(self, make_config):
@@ -156,12 +156,12 @@ class TestCallFreeLLM:
         registry.get("groq").complete = AsyncMock(side_effect=Exception("down"))
         # Anthropic (brain) succeeds as last-resort
         registry.get("anthropic").complete = AsyncMock(return_value=("brain fallback", TokenUsage()))
-        result = await registry.call_free_llm("test", prefer="groq")
+        result = await registry.call_worker_llm("test", prefer="groq")
         assert result == "brain fallback"
 
     @pytest.mark.asyncio
     async def test_timeout_records_failure(self, make_registry):
-        """Timeout in call_free_llm records circuit breaker failure (lines 568-569)."""
+        """Timeout in call_worker_llm records circuit breaker failure (lines 568-569)."""
         registry = make_registry(["groq", "gemini"])
 
         async def slow_complete(prompt, **kwargs):
@@ -169,12 +169,52 @@ class TestCallFreeLLM:
 
         registry.get("groq").complete = slow_complete
         registry.get("gemini").complete = AsyncMock(return_value=("gemini ok", TokenUsage()))
-        result = await registry.call_free_llm("test", prefer="groq")
+        result = await registry.call_worker_llm("test", prefer="groq")
         assert result == "gemini ok"
         # Groq should have a failure recorded
         assert len(registry.circuit_breaker._failures.get("groq", [])) > 0 or not registry.circuit_breaker.is_healthy(
             "groq"
         )
+
+    @pytest.mark.asyncio
+    async def test_paid_provider_as_worker(self, make_config):
+        """A paid provider placed in worker_priority is used as a worker, not just brain."""
+        config = make_config(["anthropic", "groq"])
+        registry = ProviderRegistry(
+            config.providers,
+            httpx.AsyncClient(),
+            worker_priority=["anthropic", "groq"],  # paid first
+        )
+        registry.get("anthropic").complete = AsyncMock(return_value=("paid worker ok", TokenUsage()))
+        # No prefer → fallback chain starts from worker_priority[0]
+        result = await registry.call_worker_llm("test", prefer="anthropic")
+        assert result == "paid worker ok"
+
+    @pytest.mark.asyncio
+    async def test_paid_provider_priority_respected_in_chain(self, make_config):
+        """When multiple paid/free providers are in worker_priority, order controls try sequence."""
+        config = make_config(["anthropic", "groq", "gemini"])
+        registry = ProviderRegistry(
+            config.providers,
+            httpx.AsyncClient(),
+            worker_priority=["anthropic", "gemini", "groq"],
+        )
+        registry.get("anthropic").complete = AsyncMock(side_effect=Exception("paid down"))
+        registry.get("gemini").complete = AsyncMock(return_value=("gemini ok", TokenUsage()))
+        registry.get("groq").complete = AsyncMock(return_value=("groq ok", TokenUsage()))
+        # prefer="anthropic" → try anthropic first (fails), then gemini (from worker_priority order).
+        result = await registry.call_worker_llm("test", prefer="anthropic")
+        assert result == "gemini ok"  # gemini before groq in worker_priority
+        registry.get("groq").complete.assert_not_awaited()
+
+    def test_worker_priority_accepts_paid_providers(self):
+        """worker_priority stores any provider name — no free/paid filtering."""
+        configs = {
+            "deepseek": ProviderConfig(api_key="k", type="paid", enabled=True, model="deepseek-chat"),
+            "groq": ProviderConfig(api_key="k", type="free", enabled=True, model="llama"),
+        }
+        registry = ProviderRegistry(configs, httpx.AsyncClient(), worker_priority=["deepseek", "groq"])
+        assert registry.worker_priority == ["deepseek", "groq"]
 
 
 # ── Direct calls ─────────────────────────────────────────────
@@ -335,14 +375,14 @@ class TestCircuitBreaker:
         assert "groq" in cb.get_unhealthy()
 
     @pytest.mark.asyncio
-    async def test_call_free_llm_skips_unhealthy(self, make_registry):
+    async def test_call_worker_llm_skips_unhealthy(self, make_registry):
         registry = make_registry(["groq", "gemini"])
         # Open circuit for groq
         for _ in range(5):
             registry.circuit_breaker.record_failure("groq")
         # Mock gemini to succeed
         registry.get("gemini").complete = AsyncMock(return_value=("gemini ok", TokenUsage()))
-        result = await registry.call_free_llm("test", prefer="groq")
+        result = await registry.call_worker_llm("test", prefer="groq")
         assert result == "gemini ok"
 
 
@@ -353,7 +393,7 @@ def _make_tier_registry(
     providers: dict[str, ContextTier],
 ) -> ProviderRegistry:
     """Build a registry with specific context tiers per provider."""
-    from smartsplit.config import DEFAULT_FREE_LLM_PRIORITY
+    from smartsplit.config import DEFAULT_WORKER_PRIORITY
 
     configs: dict[str, ProviderConfig] = {}
     models = {"groq": "llama-3.3-70b-versatile", "gemini": "gemini-2.5-flash"}
@@ -364,11 +404,11 @@ def _make_tier_registry(
             model=models.get(name, "test-model"),
             context_tier=tier,
         )
-    return ProviderRegistry(configs, httpx.AsyncClient(), list(DEFAULT_FREE_LLM_PRIORITY))
+    return ProviderRegistry(configs, httpx.AsyncClient(), list(DEFAULT_WORKER_PRIORITY))
 
 
 class TestContextTiers:
-    """Test that call_free_llm truncates prompts based on provider context tier."""
+    """Test that call_worker_llm truncates prompts based on provider context tier."""
 
     @pytest.mark.asyncio
     async def test_long_prompt_truncated_for_small_tier(self):
@@ -385,7 +425,7 @@ class TestContextTiers:
         provider.complete = capture_prompt
 
         long_prompt = "x" * 5000
-        await registry.call_free_llm(long_prompt, prefer="groq")
+        await registry.call_worker_llm(long_prompt, prefer="groq")
 
         assert len(received_prompts) == 1
         assert len(received_prompts[0]) == _CONTEXT_TIER_MAX_CHARS[ContextTier.SMALL]
@@ -406,7 +446,7 @@ class TestContextTiers:
         provider.complete = capture_prompt
 
         short_prompt = "x" * 3000
-        await registry.call_free_llm(short_prompt, prefer="groq")
+        await registry.call_worker_llm(short_prompt, prefer="groq")
 
         assert len(received_prompts) == 1
         assert received_prompts[0] == short_prompt
@@ -435,7 +475,7 @@ class TestContextTiers:
         gemini.complete = gemini_ok
 
         long_prompt = "x" * 10_000
-        result = await registry.call_free_llm(long_prompt, prefer="groq")
+        result = await registry.call_worker_llm(long_prompt, prefer="groq")
 
         assert result == "gemini ok"
         # Groq received truncated to SMALL tier
@@ -1125,14 +1165,14 @@ class TestProxyToBrain:
 class TestRegistryProperties:
     """Public accessors added in the audit batch."""
 
-    def test_free_llm_priority_is_a_defensive_copy(self, make_config):
+    def test_worker_priority_is_a_defensive_copy(self, make_config):
         config = make_config(["groq", "gemini"])
-        registry = ProviderRegistry(config.providers, httpx.AsyncClient(), free_llm_priority=["groq", "gemini"])
-        priority = registry.free_llm_priority
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient(), worker_priority=["groq", "gemini"])
+        priority = registry.worker_priority
         assert priority == ["groq", "gemini"]
         priority.append("mistral")
         # Internal priority must not mutate
-        assert registry.free_llm_priority == ["groq", "gemini"]
+        assert registry.worker_priority == ["groq", "gemini"]
 
     def test_http_client_exposes_shared_client(self, make_config):
         config = make_config(["groq"])

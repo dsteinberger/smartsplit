@@ -333,12 +333,12 @@ class IntentionDetector:
                 rule_prediction = _predict_from_rules(content, tool_names)
 
         # Phase 2: LLM-based prediction — skip if:
-        # - Rules already have high confidence (saves free LLM quota)
-        # - All free workers are in circuit breaker (avoids cascading 429s)
+        # - Rules already have high confidence (saves worker LLM quota)
+        # - All workers are in circuit breaker (avoids cascading 429s)
         llm_prediction = _NULL_PREDICTION
         if rule_prediction.confidence < FAKE_TOOL_CONFIDENCE:
             try:
-                priority = self._registry.free_llm_priority
+                priority = self._registry.worker_priority
                 if not isinstance(priority, list):
                     has_healthy_worker = True  # mock registry — assume available
                 else:
@@ -494,9 +494,9 @@ class IntentionDetector:
         return await self._call_and_parse(prompt)
 
     async def _call_and_parse(self, prompt: str) -> Prediction:
-        """Send prompt to free LLM, parse JSON response into Prediction."""
+        """Send prompt to worker LLM, parse JSON response into Prediction."""
         try:
-            raw = await self._registry.call_free_llm(prompt, prefer="cerebras")
+            raw = await self._registry.call_worker_llm(prompt, prefer="cerebras")
             cleaned = extract_json(raw)
             data = json.loads(cleaned)
 

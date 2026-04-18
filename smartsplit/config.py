@@ -37,7 +37,7 @@ class ProviderConfig(BaseModel):
     context_tier: ContextTier = ContextTier.SMALL
 
 
-DEFAULT_FREE_LLM_PRIORITY = ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"]
+DEFAULT_WORKER_PRIORITY = ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"]
 
 # Brain priority: paid first (best quality), then free by capability.
 _BRAIN_PRIORITY = ["anthropic", "openai", "deepseek", "groq", "gemini", "openrouter", "mistral", "cerebras"]
@@ -50,7 +50,7 @@ class SmartSplitConfig(BaseModel):
     brain: str = Field(default="", description="Main LLM provider. Auto-detected if empty.")
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     competence_table: dict[str, dict[str, int]] = Field(default_factory=dict)
-    free_llm_priority: list[str] = Field(default_factory=lambda: list(DEFAULT_FREE_LLM_PRIORITY))
+    worker_priority: list[str] = Field(default_factory=lambda: list(DEFAULT_WORKER_PRIORITY))
     overrides: dict[str, str] = Field(
         default_factory=dict,
         description="Force a specific provider for a task type. Example: {'code': 'anthropic'}",

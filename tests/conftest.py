@@ -107,7 +107,7 @@ def make_registry(make_config):
 
 @pytest.fixture
 def mock_registry():
-    """A MagicMock registry with call_free_llm as AsyncMock."""
+    """A MagicMock registry with call_worker_llm as AsyncMock."""
     registry = MagicMock()
-    registry.call_free_llm = AsyncMock()
+    registry.call_worker_llm = AsyncMock()
     return registry

@@ -82,12 +82,12 @@ async def _fill_search_args(
     messages: list[dict],
     request_id: str,
 ) -> AnticipatedTool:
-    """Extract a structured search query via free LLM, falling back to the raw prompt."""
+    """Extract a structured search query via worker LLM, falling back to the raw prompt."""
     args = dict(t.args)
     query = user_prompt[:200]
     try:
         context = extract_project_context(messages)
-        raw = await ctx.registry.call_free_llm(
+        raw = await ctx.registry.call_worker_llm(
             SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", user_prompt[:500]),
             prefer="cerebras",
         )
@@ -110,7 +110,7 @@ async def _fill_missing_args(
 ) -> list:
     """Fill in missing args for anticipated tools.
 
-    The free LLM predictor often predicts the tool type but omits args.
+    The worker LLM predictor often predicts the tool type but omits args.
     We extract plausible args from the user prompt and context.
     """
     mentioned_files = list(dict.fromkeys(_FILE_REF_RE.findall(user_prompt)))

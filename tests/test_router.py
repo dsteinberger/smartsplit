@@ -619,7 +619,7 @@ class TestFastModelRetryAndContextErrors:
             return_value=("A proper answer that clearly passes the quality gate and is long enough", TokenUsage())
         )
         # Force LLM refusal check to return True for groq's response
-        registry.call_free_llm = AsyncMock(return_value="yes")
+        registry.call_worker_llm = AsyncMock(return_value="yes")
 
         subtask = Subtask(type=TaskType.REASONING, content="explain recursion", complexity=Complexity.MEDIUM)
         result = await router.route(subtask)

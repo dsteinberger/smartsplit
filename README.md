@@ -350,22 +350,24 @@ More providers = better routing, more fallbacks, higher resilience.
 
 > **Format translation is automatic.** Most providers use the OpenAI format natively. Gemini uses Google's own format — SmartSplit translates on the fly. Your client talks OpenAI, SmartSplit handles the rest.
 
-> **Paid providers** (Anthropic, OpenAI) are also supported as optional fallbacks. They're disabled by default.
+> **Paid providers** (DeepSeek, Anthropic, OpenAI, Perplexity) work as brain *or* worker alongside free ones. Put them in `worker_priority` and the router uses them wherever their score wins. Disabled by default — enable in config or set the corresponding env var.
 
 <details>
 <summary><b>Routing table</b></summary>
 
+Ranked by competence score. Paid providers are marked `(paid)` — they compete on merit and are picked only when scoring wins (and the key is configured).
+
 ```
-Task          Best free providers (ranked)
-─────────────────────────────────────────────
-code          OpenRouter > Cerebras = Gemini > Groq = HuggingFace
-reasoning     Cerebras > Gemini = OpenRouter > Groq
-summarize     Cerebras > Groq = Gemini = Mistral = OpenRouter
-translation   Mistral > Gemini > Groq = Cerebras
-web search    Serper or Tavily
-boilerplate   Cerebras = Groq > Gemini = Mistral = OpenRouter
-math          OpenRouter = Gemini > Cerebras > Groq
-general       Cerebras > Gemini = OpenRouter > Groq = Mistral
+Task          Best workers (ranked)
+─────────────────────────────────────────────────────────────────────
+code          OpenRouter = DeepSeek (paid) > Anthropic = OpenAI (paid) > Cerebras = Gemini > Groq
+reasoning     Cerebras = DeepSeek (paid) = Anthropic = OpenAI (paid) > Gemini = OpenRouter > Groq
+summarize     Cerebras = DeepSeek (paid) = Anthropic (paid) > Groq = Gemini = Mistral = OpenRouter
+translation   Mistral > Gemini = DeepSeek = Anthropic = OpenAI (paid) > Groq = Cerebras
+web search    Perplexity (paid) > Serper = Tavily
+boilerplate   Groq = Cerebras = DeepSeek (paid) > Gemini = Mistral = OpenRouter
+math          DeepSeek (paid) > Anthropic = OpenAI (paid) > OpenRouter = Gemini > Cerebras > Groq
+general       Cerebras = DeepSeek (paid) = Anthropic (paid) > Gemini = OpenRouter > Groq = Mistral
 
 Backups:      HuggingFace, Cloudflare (lower quality, high availability)
 ```
@@ -435,7 +437,7 @@ You can also tune provider settings and routing:
 ```json
 {
   "mode": "balanced",
-  "free_llm_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
+  "worker_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
   "providers": {
     "groq": {
       "model": "llama-3.3-70b-versatile",
@@ -451,7 +453,7 @@ You can also tune provider settings and routing:
 
 | Option | Default | What it does |
 |--------|---------|-------------|
-| `free_llm_priority` | cerebras, groq, gemini, openrouter, mistral, huggingface, cloudflare | Fallback order for free LLM calls |
+| `worker_priority` | cerebras, groq, gemini, openrouter, mistral, huggingface, cloudflare | Fallback order for worker LLM calls. Paid providers (DeepSeek, OpenAI, ...) are welcome here. |
 | `providers.*.model` | per-provider default | Override the default model |
 | `providers.*.temperature` | `0.3` | LLM temperature |
 | `providers.*.max_tokens` | `4096` | Max output tokens |

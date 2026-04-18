@@ -331,7 +331,7 @@ def is_internal_agent_call(body: dict) -> bool:
 
     When both signals fire, SmartSplit should skip enrichment and prediction
     entirely and forward the request as-is. Enriching an internal call pollutes
-    its context and burns free LLM budget on a request the user never made.
+    its context and burns worker LLM budget on a request the user never made.
     """
     max_tokens = body.get("max_tokens") or 0
     if not (0 < max_tokens < _INTERNAL_CALL_MAX_TOKENS):

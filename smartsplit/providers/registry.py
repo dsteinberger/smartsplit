@@ -205,22 +205,22 @@ class ProviderRegistry:
     Responsibilities:
     - Instantiate providers from config (Factory)
     - Provide typed lookups (LLM vs Search)
-    - Offer a resilient ``call_free_llm`` with ordered fallback
+    - Offer a resilient ``call_worker_llm`` with ordered fallback across worker LLMs
     """
 
     def __init__(
         self,
         provider_configs: dict[str, ProviderConfig],
         http: httpx.AsyncClient,
-        free_llm_priority: list[str] | None = None,
+        worker_priority: list[str] | None = None,
         brain_name: str = "",
     ) -> None:
-        from smartsplit.config import DEFAULT_FREE_LLM_PRIORITY
+        from smartsplit.config import DEFAULT_WORKER_PRIORITY
 
         self._providers: dict[str, BaseProvider] = {}
         self._provider_configs = provider_configs
         self._http = http
-        self._free_llm_priority = free_llm_priority or list(DEFAULT_FREE_LLM_PRIORITY)
+        self._worker_priority = worker_priority or list(DEFAULT_WORKER_PRIORITY)
         self.brain_name = brain_name
         self.circuit_breaker = CircuitBreaker()
 
@@ -278,9 +278,9 @@ class ProviderRegistry:
         return self._providers.get(name)
 
     @property
-    def free_llm_priority(self) -> list[str]:
-        """Ordered list of free LLM provider names for fallback."""
-        return list(self._free_llm_priority)
+    def worker_priority(self) -> list[str]:
+        """Ordered list of worker LLM provider names for fallback (paid providers welcome)."""
+        return list(self._worker_priority)
 
     @property
     def http_client(self) -> httpx.AsyncClient:
@@ -367,9 +367,13 @@ class ProviderRegistry:
             lambda provider: provider.proxy_openai_request(body),
         )
 
-    async def call_free_llm(self, prompt: str, prefer: str = "groq") -> str:
-        """Try free LLMs in priority order, with brain as last-resort fallback."""
-        order = [prefer] + [p for p in self._free_llm_priority if p != prefer]
+    async def call_worker_llm(self, prompt: str, prefer: str = "groq") -> str:
+        """Try worker LLMs in priority order, with brain as last-resort fallback.
+
+        The priority list is ``worker_priority`` — paid providers (DeepSeek, OpenAI, …)
+        are welcome alongside free ones. ``prefer`` is tried first.
+        """
+        order = [prefer] + [p for p in self._worker_priority if p != prefer]
         # Brain is excluded from the main loop but added as last-resort fallback
         # so single-provider setups (only a paid brain) still work.
         if self.brain_name and self.brain_name not in order:
@@ -395,16 +399,16 @@ class ProviderRegistry:
                 self.circuit_breaker.record_success(name)
                 return result
             except TimeoutError as e:
-                logger.warning("Free LLM %s timed out after %ss", name, PROVIDER_CALL_TIMEOUT)
+                logger.warning("Worker LLM %s timed out after %ss", name, PROVIDER_CALL_TIMEOUT)
                 self.circuit_breaker.record_failure(name, e)
             except ProviderRateLimitError as e:
-                logger.info("Free LLM %s rate-limited", name)
+                logger.info("Worker LLM %s rate-limited", name)
                 self.circuit_breaker.record_rate_limit(name, e.retry_after)
             except Exception as e:
-                logger.warning("Free LLM %s failed: %s: %s", name, type(e).__name__, _sanitize_error(e))
+                logger.warning("Worker LLM %s failed: %s: %s", name, type(e).__name__, _sanitize_error(e))
                 self.circuit_breaker.record_failure(name, e)
 
-        raise NoProviderAvailableError("free_llm")
+        raise NoProviderAvailableError("worker_llm")
 
     async def call_llm(
         self,

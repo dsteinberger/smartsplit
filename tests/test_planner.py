@@ -123,14 +123,14 @@ class TestKeywordFallbackDetection:
 class TestClassifyDomains:
     @pytest.mark.asyncio
     async def test_llm_returns_valid_domains(self, mock_registry):
-        mock_registry.call_free_llm.return_value = '["code", "math"]'
+        mock_registry.call_worker_llm.return_value = '["code", "math"]'
         planner = Planner(mock_registry)
         domains = await planner.classify_domains("Write a function to compute factorial")
         assert domains == ["code", "math"]
 
     @pytest.mark.asyncio
     async def test_llm_filters_invalid_domains(self, mock_registry):
-        mock_registry.call_free_llm.return_value = '["code", "quantum_physics", "math"]'
+        mock_registry.call_worker_llm.return_value = '["code", "quantum_physics", "math"]'
         planner = Planner(mock_registry)
         domains = await planner.classify_domains("test prompt")
         assert domains == ["code", "math"]
@@ -138,14 +138,14 @@ class TestClassifyDomains:
 
     @pytest.mark.asyncio
     async def test_llm_failure_falls_back_to_keywords(self, mock_registry):
-        mock_registry.call_free_llm.side_effect = ProviderError("test", "no LLM")
+        mock_registry.call_worker_llm.side_effect = ProviderError("test", "no LLM")
         planner = Planner(mock_registry)
         domains = await planner.classify_domains("Write a Python function to sort a list")
         assert "code" in domains
 
     @pytest.mark.asyncio
     async def test_llm_returns_garbage_falls_back(self, mock_registry):
-        mock_registry.call_free_llm.return_value = "I don't understand"
+        mock_registry.call_worker_llm.return_value = "I don't understand"
         planner = Planner(mock_registry)
         # Keyword fallback should still work for English prompts
         domains = await planner.classify_domains("Calculate the integral of x squared")
@@ -153,7 +153,7 @@ class TestClassifyDomains:
 
     @pytest.mark.asyncio
     async def test_llm_returns_empty_list_falls_back(self, mock_registry):
-        mock_registry.call_free_llm.return_value = "[]"
+        mock_registry.call_worker_llm.return_value = "[]"
         planner = Planner(mock_registry)
         domains = await planner.classify_domains("Write a Python function")
         # Falls back to keywords since LLM returned no valid domains
@@ -161,7 +161,7 @@ class TestClassifyDomains:
 
     @pytest.mark.asyncio
     async def test_llm_strips_markdown_fences(self, mock_registry):
-        mock_registry.call_free_llm.return_value = '```json\n["translation"]\n```'
+        mock_registry.call_worker_llm.return_value = '```json\n["translation"]\n```'
         planner = Planner(mock_registry)
         domains = await planner.classify_domains("Traduisez ce texte en anglais")
         assert domains == ["translation"]
@@ -179,25 +179,25 @@ class TestDecompose:
         assert len(subtasks) == 1
         assert subtasks[0].content == _SHORT_PROMPT
         assert subtasks[0].complexity.value == "low"
-        mock_registry.call_free_llm.assert_not_called()
+        mock_registry.call_worker_llm.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_single_domain_skips_llm_decomposition(self, mock_registry):
         """Single-domain prompts should route direct without decomposition LLM call."""
         # classify_domains returns single domain → no decomposition
-        mock_registry.call_free_llm.return_value = '["code"]'
+        mock_registry.call_worker_llm.return_value = '["code"]'
         planner = Planner(mock_registry)
         subtasks = await planner.decompose(_SINGLE_DOMAIN_PROMPT)
         assert len(subtasks) == 1
         assert subtasks[0].type == TaskType.CODE
         assert subtasks[0].content == _SINGLE_DOMAIN_PROMPT
         # Only 1 call: classification. No decomposition call.
-        assert mock_registry.call_free_llm.call_count == 1
+        assert mock_registry.call_worker_llm.call_count == 1
 
     @pytest.mark.asyncio
     async def test_multi_domain_triggers_decomposition(self, mock_registry):
         """Multi-domain prompts should call the LLM for decomposition."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             # 1st call: classification
             '["code", "writing"]',
             # 2nd call: decomposition
@@ -214,12 +214,12 @@ class TestDecompose:
         subtasks = await planner.decompose(_MULTI_DOMAIN_PROMPT)
         assert len(subtasks) == 2
         # classify + decompose + context injection = 3 calls
-        assert mock_registry.call_free_llm.call_count == 3
+        assert mock_registry.call_worker_llm.call_count == 3
 
     @pytest.mark.asyncio
     async def test_fallback_on_bad_json(self, mock_registry):
         """If decomposition LLM returns garbage, fall back to single task."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["code", "writing"]',  # classification
             "This is not JSON at all",  # decomposition fails
         ]
@@ -231,7 +231,7 @@ class TestDecompose:
     @pytest.mark.asyncio
     async def test_fallback_on_provider_failure(self, mock_registry):
         """If the planner LLM is down, fall back to single task."""
-        mock_registry.call_free_llm.side_effect = ProviderError("test", "no LLM")
+        mock_registry.call_worker_llm.side_effect = ProviderError("test", "no LLM")
         planner = Planner(mock_registry)
         subtasks = await planner.decompose(_MULTI_DOMAIN_PROMPT)
         # Classification fails → keyword fallback detects multi-domain → decomposition fails → single task
@@ -239,7 +239,7 @@ class TestDecompose:
 
     @pytest.mark.asyncio
     async def test_markdown_wrapped_json(self, mock_registry):
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["code", "writing"]',
             '```json\n[{"type": "code", "content": "hello", "complexity": "low"}]\n```',
         ]
@@ -249,7 +249,7 @@ class TestDecompose:
 
     @pytest.mark.asyncio
     async def test_dict_wrapped_in_list(self, mock_registry):
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["code", "writing"]',
             json.dumps({"type": "code", "content": "hello", "complexity": "low"}),
         ]
@@ -260,7 +260,7 @@ class TestDecompose:
     @pytest.mark.asyncio
     async def test_depends_on_parsed(self, mock_registry):
         """Subtasks with depends_on should preserve the dependency index."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["web_search", "summarize"]',
             json.dumps(
                 [
@@ -279,7 +279,7 @@ class TestDecompose:
     @pytest.mark.asyncio
     async def test_invalid_task_type_fallback(self, mock_registry):
         """If the LLM returns an unknown task type, Pydantic validation fails -> fallback."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["code", "writing"]',
             json.dumps([{"type": "quantum_computing", "content": "test", "complexity": "low"}]),
         ]
@@ -291,7 +291,7 @@ class TestDecompose:
     @pytest.mark.asyncio
     async def test_max_subtasks_economy(self, mock_registry):
         """Economy mode should cap at 3 subtasks."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["code", "writing"]',
             json.dumps(
                 [
@@ -311,7 +311,7 @@ class TestDecompose:
     @pytest.mark.asyncio
     async def test_truncation_invalidates_depends_on(self, mock_registry):
         """depends_on pointing to truncated subtasks should be set to None."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["code", "writing"]',
             json.dumps(
                 [
@@ -336,7 +336,7 @@ class TestDecompose:
     @pytest.mark.asyncio
     async def test_messages_deep_copied_between_subtasks(self, mock_registry):
         """Messages should be deep-copied so subtasks don't share mutable state."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             '["code", "writing"]',
             json.dumps(
                 [
@@ -364,7 +364,7 @@ class TestDecompose:
     @pytest.mark.asyncio
     async def test_no_domain_defaults_to_general(self, mock_registry):
         """Prompts with no clear domain should route as general."""
-        mock_registry.call_free_llm.return_value = "[]"
+        mock_registry.call_worker_llm.return_value = "[]"
         planner = Planner(mock_registry)
         subtasks = await planner.decompose(_AMBIGUOUS_PROMPT)
         assert len(subtasks) == 1
@@ -378,7 +378,7 @@ class TestContextInjection:
     @pytest.mark.asyncio
     async def test_context_injected_on_multi_subtask(self, mock_registry):
         """When decomposition produces 2+ subtasks, context should be injected."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             # 1st call: classification
             '["code", "writing"]',
             # 2nd call: decomposition
@@ -400,7 +400,7 @@ class TestContextInjection:
     @pytest.mark.asyncio
     async def test_context_injection_failure_uses_raw_subtasks(self, mock_registry):
         """If context generation fails, subtasks should be returned as-is."""
-        mock_registry.call_free_llm.side_effect = [
+        mock_registry.call_worker_llm.side_effect = [
             # 1st call: classification
             '["code", "writing"]',
             # 2nd call: decomposition succeeds
@@ -424,8 +424,8 @@ class TestContextInjection:
 
 class TestSynthesize:
     @pytest.mark.asyncio
-    async def test_synthesis_calls_free_llm(self, mock_registry):
-        mock_registry.call_free_llm.return_value = "Unified response."
+    async def test_synthesis_calls_worker_llm(self, mock_registry):
+        mock_registry.call_worker_llm.return_value = "Unified response."
         planner = Planner(mock_registry)
         results = [
             RouteResult(type=TaskType.WEB_SEARCH, response="Found info", provider="serper"),
@@ -433,11 +433,11 @@ class TestSynthesize:
         ]
         synthesis = await planner.synthesize("Research and code", results)
         assert synthesis == "Unified response."
-        mock_registry.call_free_llm.assert_called_once()
+        mock_registry.call_worker_llm.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_synthesis_fallback_concatenates(self, mock_registry):
-        mock_registry.call_free_llm.side_effect = ProviderError("test", "down")
+        mock_registry.call_worker_llm.side_effect = ProviderError("test", "down")
         planner = Planner(mock_registry)
         results = [
             RouteResult(type=TaskType.WEB_SEARCH, response="Result A", provider="serper"),
@@ -483,7 +483,7 @@ class TestDecomposeCache:
     @pytest.mark.asyncio
     async def test_cache_integrated_in_planner(self, mock_registry):
         """Second call with same prompt should hit cache and not call LLM."""
-        mock_registry.call_free_llm.return_value = '["code"]'
+        mock_registry.call_worker_llm.return_value = '["code"]'
         planner = Planner(mock_registry)
         # Prompt must be >80 chars to trigger domain detection
         prompt = "Explain in detail what a Python decorator is and how to use it in real world projects today"
@@ -492,4 +492,4 @@ class TestDecomposeCache:
         assert result1 == result2
         assert planner.cache.hits == 1
         # LLM called once for classification on first decompose, cached on second
-        assert mock_registry.call_free_llm.call_count == 1
+        assert mock_registry.call_worker_llm.call_count == 1

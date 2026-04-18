@@ -182,11 +182,11 @@ async def detect_with_llm(
 ) -> tuple[TriageDecision, list[str]]:
     """LLM-based triage for prompts that keywords missed.
 
-    Uses a fast free LLM to decide if enrichment adds value.
+    Uses a fast worker LLM to decide if enrichment adds value.
     Returns TRANSPARENT if the LLM call fails or finds nothing enrichment-worthy.
     """
     try:
-        raw = await registry.call_free_llm(
+        raw = await registry.call_worker_llm(
             _TRIAGE_PROMPT + prompt + "\n--- END PROMPT ---",
             prefer="cerebras",
         )

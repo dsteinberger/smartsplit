@@ -359,13 +359,13 @@ class Router:
         return Router.quality_gate_reason(response, subtask) is None
 
     async def _check_refusal_llm(self, response: str) -> bool:
-        """Use a free LLM to check if a response is a refusal (multilingual).
+        """Use a worker LLM to check if a response is a refusal (multilingual).
 
         Returns True if the response IS a refusal. Only called for suspicious
         short responses that passed pattern matching. Result feeds the MAB.
         """
         try:
-            result = await self._registry.call_free_llm(
+            result = await self._registry.call_worker_llm(
                 "Is this AI response a refusal or apology for not being able to help? "
                 "Answer ONLY 'yes' or 'no'.\n\n"
                 f"Response: {response[:300]}",

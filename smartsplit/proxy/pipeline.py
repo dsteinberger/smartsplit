@@ -1,6 +1,6 @@
 """SmartSplit — Multi-LLM backend with intelligent routing.
 
-An OpenAI-compatible endpoint that routes every request to the best free LLM
+An OpenAI-compatible endpoint that routes every request to the best worker LLM
 for the task. Works as a drop-in backend for Continue, Cline, Aider, or any
 OpenAI-compatible client.
 
@@ -164,7 +164,7 @@ def build_proxy_context(cfg: SmartSplitConfig, mode: Mode, *, read_timeout: floa
         limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
     )
     quota = QuotaTracker(provider_configs=cfg.providers)
-    registry = ProviderRegistry(cfg.providers, http, free_llm_priority=cfg.free_llm_priority, brain_name=cfg.brain)
+    registry = ProviderRegistry(cfg.providers, http, worker_priority=cfg.worker_priority, brain_name=cfg.brain)
     planner = Planner(registry)
     bandit = BanditScorer()
     router = Router(registry, quota, cfg, bandit=bandit)
@@ -392,7 +392,7 @@ async def _run_pipeline(
     """
     # Agent-internal background calls (auto-compact, title gen, task tracker, …)
     # are text-generation requests the user never typed — forward as-is to avoid
-    # polluting their context with enrichment and wasting free LLM budget on them.
+    # polluting their context with enrichment and wasting worker LLM budget on them.
     if is_internal_agent_call(body_dict):
         logger.debug("[%s] Internal agent call detected — skipping pipeline", request_id)
         return {"type": "passthrough"}

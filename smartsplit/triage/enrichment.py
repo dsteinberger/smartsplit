@@ -35,10 +35,10 @@ async def _extract_search_query(
     *,
     store_on_ctx: bool = False,
 ) -> str:
-    """Refine ``prompt`` into a concise Google-ready query via free LLM, else return it unchanged."""
+    """Refine ``prompt`` into a concise Google-ready query via worker LLM, else return it unchanged."""
     try:
         context = extract_project_context(messages or [])
-        raw_queries = await ctx.registry.call_free_llm(
+        raw_queries = await ctx.registry.call_worker_llm(
             SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", prompt),
             prefer="cerebras",
         )

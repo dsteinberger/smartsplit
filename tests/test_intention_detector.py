@@ -160,7 +160,7 @@ class TestPredictionFiltersSafeTools:
             }
         )
         registry = MagicMock()
-        registry.call_free_llm = AsyncMock(return_value=llm_response)
+        registry.call_worker_llm = AsyncMock(return_value=llm_response)
 
         detector = IntentionDetector(registry)
         prediction = await detector.predict(
@@ -185,7 +185,7 @@ class TestPredictionFiltersSafeTools:
             }
         )
         registry = MagicMock()
-        registry.call_free_llm = AsyncMock(return_value=llm_response)
+        registry.call_worker_llm = AsyncMock(return_value=llm_response)
 
         detector = IntentionDetector(registry)
         prediction = await detector.predict(
@@ -219,7 +219,7 @@ class TestNullPrediction:
             }
         )
         registry = MagicMock()
-        registry.call_free_llm = AsyncMock(return_value=llm_response)
+        registry.call_worker_llm = AsyncMock(return_value=llm_response)
 
         detector = IntentionDetector(registry)
         prediction = await detector.predict(
@@ -231,7 +231,7 @@ class TestNullPrediction:
     @pytest.mark.asyncio
     async def test_llm_failure_returns_null(self):
         registry = MagicMock()
-        registry.call_free_llm = AsyncMock(side_effect=Exception("LLM down"))
+        registry.call_worker_llm = AsyncMock(side_effect=Exception("LLM down"))
 
         detector = IntentionDetector(registry)
         prediction = await detector.predict(

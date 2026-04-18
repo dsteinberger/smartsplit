@@ -150,7 +150,7 @@ class TestBuildEnrichedMessages:
 def _make_ctx(
     brain_side_effect=None,
     brain_return=None,
-    free_llm_return='["python docs"]',
+    worker_llm_return='["python docs"]',
     route_return=None,
 ):
     """Build a mock ProxyContext for enrich_and_forward tests."""
@@ -158,8 +158,8 @@ def _make_ctx(
     ctx.registry.brain_name = "groq"
     ctx.mode = Mode.BALANCED
 
-    # call_free_llm — used for search query extraction
-    ctx.registry.call_free_llm = AsyncMock(return_value=free_llm_return)
+    # call_worker_llm — used for search query extraction
+    ctx.registry.call_worker_llm = AsyncMock(return_value=worker_llm_return)
 
     # call_brain
     ctx.registry.call_brain = AsyncMock()
@@ -450,13 +450,13 @@ class TestExtractSearchQuery:
 
     @pytest.mark.asyncio
     async def test_store_on_ctx_writes_refined_query(self):
-        """When store_on_ctx=True and the free LLM returns a JSON array, the refined query lands on ctx."""
+        """When store_on_ctx=True and the worker LLM returns a JSON array, the refined query lands on ctx."""
         from smartsplit.triage.enrichment import _extract_search_query
 
         ctx = MagicMock()
         ctx.last_search_query = ""
         ctx.registry = MagicMock()
-        ctx.registry.call_free_llm = AsyncMock(return_value='["python 3.13 release notes"]')
+        ctx.registry.call_worker_llm = AsyncMock(return_value='["python 3.13 release notes"]')
 
         refined = await _extract_search_query(ctx, "What's new in Python 3.13?", None, store_on_ctx=True)
         assert refined == "python 3.13 release notes"
@@ -468,7 +468,7 @@ class TestExtractSearchQuery:
 
         ctx = MagicMock()
         ctx.registry = MagicMock()
-        ctx.registry.call_free_llm = AsyncMock(side_effect=RuntimeError("llm down"))
+        ctx.registry.call_worker_llm = AsyncMock(side_effect=RuntimeError("llm down"))
 
         refined = await _extract_search_query(ctx, "raw prompt", None)
         assert refined == "raw prompt"
