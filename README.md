@@ -60,19 +60,17 @@ Same tool. Faster answers. No config change.
 
 ### What makes SmartSplit different
 
-**Faster responses.** SmartSplit predicts what your brain will ask for — files, greps, searches — and returns it instantly as a FAKE tool call. Your agent executes locally, the brain skips a full round-trip. Less waiting, fewer tokens, every request.
-
-**Multiply your free tier.** One provider's quota runs out fast. SmartSplit spreads requests across all your configured providers — each contributing its free tier, each specialized for what it does best. More providers = more capacity, better answers, effectively unlimited free usage.
-
-**Keep your Claude subscription.** Already paying for Claude Pro or Max? Don't cancel it — supercharge it. SmartSplit plugs in as an HTTPS proxy, your Claude Code authentication stays untouched, and round-trips get cut automatically. No API key swap, no workflow change.
-
-**Stretch your paid tokens.** Got an OpenAI or Anthropic API key? SmartSplit picks the right tier per task automatically — cheap model for boilerplate, top model for reasoning. Your budget lasts longer without you thinking about it:
+**Get more from every key — free or paid.** One free tier runs out fast; one paid key drains faster than you think. SmartSplit spreads requests across all your providers — each contributing its free quota, each specialized for what it does best. Got an OpenAI or Anthropic key too? It picks the right tier per task automatically — cheap model for boilerplate, top model for reasoning. More providers = more capacity. Smarter routing = budget that lasts.
 
 ```
 Simple task (boilerplate, summary)  → Haiku / GPT-4o-mini  (cheap)
 Complex task (code, reasoning)      → Sonnet / GPT-4o      (best)
 Everything else                     → Free models first
 ```
+
+**Faster responses.** SmartSplit predicts what your brain will ask for — files, greps, searches — and returns it instantly as a FAKE tool call. Your agent executes locally, the brain skips a full round-trip. Less waiting, fewer tokens, every request.
+
+**Keep your Claude subscription.** Already paying for Claude Pro or Max? Don't cancel it — supercharge it. SmartSplit plugs in as an HTTPS proxy, your Claude Code authentication stays untouched, and round-trips get cut automatically. No API key swap, no workflow change.
 
 **Gets smarter over time.** A pattern learner observes your actual tool calls (Wilson-scored confidence); adaptive routing (MAB/UCB1) auto-calibrates provider scores from real results. The more you use SmartSplit, the sharper its predictions get.
 
@@ -118,9 +116,12 @@ smartsplit
 
 ```
   SmartSplit — Multi-LLM backend
-  http://127.0.0.1:8420/v1
-  Mode: balanced
+  API:    http://127.0.0.1:8420/v1
+  Proxy:  http://127.0.0.1:8421   (HTTPS_PROXY for Claude Code)
+  Mode:   balanced
 ```
+
+> API + HTTPS proxy run side by side in one process. Use `--api-only` or `--proxy-only` to run just one.
 
 <details>
 <summary><b>Or use Docker</b></summary>
@@ -145,16 +146,18 @@ docker compose up -d
 Claude Code connects via HTTPS proxy — SmartSplit intercepts requests transparently.
 
 ```bash
-# Terminal 1: start the proxy (generates certs on first run)
-smartsplit --proxy
+# Terminal 1: start SmartSplit (API + proxy unified — default)
+smartsplit
 
-# Terminal 2: launch Claude Code through SmartSplit
+# Terminal 2: launch Claude Code through the proxy
 NODE_EXTRA_CA_CERTS=~/.smartsplit/certs/ca-cert.pem \
-HTTPS_PROXY=http://localhost:8420 \
+HTTPS_PROXY=http://localhost:8421 \
 claude
 ```
 
 That's it — Claude Code's tool calls are now anticipated by SmartSplit, saving round-trips automatically.
+
+> Only running Claude Code? Use `smartsplit --proxy-only` to skip the API endpoint (proxy then listens on :8420).
 </details>
 
 <details>

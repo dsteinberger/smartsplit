@@ -6,8 +6,24 @@ from unittest.mock import MagicMock, patch
 
 
 class TestMain:
-    def test_default_mode_is_balanced(self, monkeypatch):
+    def test_default_is_unified(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["smartsplit"])
+        with patch("smartsplit.cli._run_unified") as mock_unified:
+            from smartsplit.cli import main
+
+            main()
+            mock_unified.assert_called_once_with(8420, 8421, "127.0.0.1", "INFO", "balanced")
+
+    def test_unified_custom_ports(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["smartsplit", "--port", "9000", "--proxy-port", "9001"])
+        with patch("smartsplit.cli._run_unified") as mock_unified:
+            from smartsplit.cli import main
+
+            main()
+            mock_unified.assert_called_once_with(9000, 9001, "127.0.0.1", "INFO", "balanced")
+
+    def test_api_only(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["smartsplit", "--api-only"])
         mock_uvicorn = MagicMock()
         mock_app = MagicMock()
         with (
@@ -23,8 +39,8 @@ class TestMain:
             assert call_kwargs[1]["port"] == 8420
             assert call_kwargs[1]["host"] == "127.0.0.1"
 
-    def test_custom_port(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["smartsplit", "--port", "9999"])
+    def test_api_only_custom_port(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["smartsplit", "--api-only", "--port", "9999"])
         mock_uvicorn = MagicMock()
         mock_app = MagicMock()
         with (
@@ -36,21 +52,40 @@ class TestMain:
             main()
             assert mock_uvicorn.run.call_args[1]["port"] == 9999
 
-    def test_proxy_flag(self, monkeypatch):
+    def test_proxy_only_flag(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["smartsplit", "--proxy-only"])
+        with patch("smartsplit.cli._run_proxy_only") as mock_proxy:
+            from smartsplit.cli import main
+
+            main()
+            mock_proxy.assert_called_once_with(8420, "127.0.0.1", "INFO", "balanced")
+
+    def test_proxy_legacy_alias(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["smartsplit", "--proxy"])
-        with patch("smartsplit.cli._run_proxy_mode") as mock_proxy:
+        with patch("smartsplit.cli._run_proxy_only") as mock_proxy:
             from smartsplit.cli import main
 
             main()
             mock_proxy.assert_called_once_with(8420, "127.0.0.1", "INFO", "balanced")
 
     def test_proxy_with_quality_mode(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["smartsplit", "--proxy", "--mode", "quality"])
-        with patch("smartsplit.cli._run_proxy_mode") as mock_proxy:
+        monkeypatch.setattr("sys.argv", ["smartsplit", "--proxy-only", "--mode", "quality"])
+        with patch("smartsplit.cli._run_proxy_only") as mock_proxy:
             from smartsplit.cli import main
 
             main()
             mock_proxy.assert_called_once_with(8420, "127.0.0.1", "INFO", "quality")
+
+    def test_api_only_conflicts_with_proxy_only(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.argv", ["smartsplit", "--api-only", "--proxy-only"])
+        from smartsplit.cli import main
+
+        try:
+            main()
+        except SystemExit as exc:
+            assert exc.code == 2
+        err = capsys.readouterr().err
+        assert "cannot be combined" in err
 
     def test_setup_claude_command(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["smartsplit", "setup-claude"])
@@ -60,8 +95,8 @@ class TestMain:
             main()
             mock_setup.assert_called_once()
 
-    def test_economy_mode(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["smartsplit", "--mode", "economy"])
+    def test_economy_mode_in_api_only(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["smartsplit", "--api-only", "--mode", "economy"])
         mock_uvicorn = MagicMock()
         mock_app = MagicMock()
         with (
@@ -74,23 +109,22 @@ class TestMain:
             mock_create.assert_called_once_with(mode="economy")
 
 
-class TestRunProxyMode:
+class TestRunProxyOnly:
     def test_calls_start_proxy(self):
         with patch("smartsplit.proxy.server.start_proxy") as mock_sp:
-            from smartsplit.cli import _run_proxy_mode
+            from smartsplit.cli import _run_proxy_only
 
-            _run_proxy_mode(8420, "127.0.0.1", "INFO")
+            _run_proxy_only(8420, "127.0.0.1", "INFO", "balanced")
             mock_sp.assert_called_once_with(port=8420, host="127.0.0.1", log_level="INFO")
 
     def test_passes_mode_via_env(self, monkeypatch):
         with patch("smartsplit.proxy.server.start_proxy"):
-            from smartsplit.cli import _run_proxy_mode
+            from smartsplit.cli import _run_proxy_only
 
-            _run_proxy_mode(8420, "127.0.0.1", "INFO", "quality")
+            _run_proxy_only(8420, "127.0.0.1", "INFO", "quality")
             import os
 
             assert os.environ.get("SMARTSPLIT_MODE") == "quality"
-        # Clean up
         monkeypatch.delenv("SMARTSPLIT_MODE", raising=False)
 
 

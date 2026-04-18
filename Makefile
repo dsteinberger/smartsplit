@@ -4,8 +4,8 @@ ifdef DEBUG
   export LOG_LEVEL=DEBUG
 endif
 
-.PHONY: help install install-proxy test lint format check run proxy setup-claude watch clean env \
-        build up up-proxy down restart-proxy rebuild-proxy
+.PHONY: help install install-proxy test lint format check run run-api run-proxy setup-claude watch clean env \
+        build up up-api up-proxy down restart-proxy rebuild-proxy
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -36,11 +36,14 @@ check: lint ## Lint + format check + tests
 
 # ── Run ──────────────────────────────────────────────────────
 
-run: ## Start SmartSplit server (API mode) — DEBUG=1 for verbose
-	uv run python -m smartsplit
+run: ## Start SmartSplit (API + proxy unified — default) — DEBUG=1 for verbose
+	uv run smartsplit
 
-proxy: ## Start SmartSplit in HTTPS proxy mode — DEBUG=1 for verbose
-	uv run smartsplit --proxy
+run-api: ## Start SmartSplit API only — DEBUG=1 for verbose
+	uv run smartsplit --api-only
+
+run-proxy: ## Start SmartSplit HTTPS proxy only — DEBUG=1 for verbose
+	uv run smartsplit --proxy-only
 
 setup-claude: ## One-time Claude Code setup (generates certs)
 	uv run --extra proxy smartsplit setup-claude
@@ -48,19 +51,22 @@ setup-claude: ## One-time Claude Code setup (generates certs)
 watch: ## Run provider watch locally
 	uv run python scripts/provider_watch.py
 
-# ── Docker (proxy / API — même image) ───────────────────────
+# ── Docker (unified / API only / proxy only — même image) ───
 
 build: ## Docker — build image
 	docker build -t smartsplit .
 
-up: ## Docker — start API mode (DEBUG=1 for verbose)
+up: ## Docker — start unified (API + proxy) — DEBUG=1 for verbose
 	docker compose up -d smartsplit
 
-up-proxy: ## Docker — start proxy mode (HTTPS interception for Claude Code)
+up-api: ## Docker — start API only
+	docker compose --profile api up -d api
+
+up-proxy: ## Docker — start proxy only (HTTPS interception for Claude Code)
 	docker compose --profile proxy up -d proxy
 
-down: ## Docker — stop all services (API + proxy)
-	docker compose --profile proxy down
+down: ## Docker — stop all services (unified + api + proxy)
+	docker compose --profile api --profile proxy down
 
 restart-proxy: ## Docker — recreate proxy (fixes silent port-binding failures)
 	docker compose --profile proxy up -d --force-recreate proxy
