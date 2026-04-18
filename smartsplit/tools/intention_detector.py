@@ -140,18 +140,31 @@ def _looks_like_project_path(path: str) -> bool:
     return "/" in path or path.startswith(".") or path in _WELL_KNOWN_FILES or ext in _CODE_EXTENSIONS
 
 
-def _predict_file_mentions(user_content: str) -> tuple[list[AnticipatedTool], list[str]]:
+def _pick_read_tool(tool_names: set[str]) -> str:
+    """Return the read-file tool name the client exposes, or the canonical handler."""
+    return "Read" if "Read" in tool_names else "read_file"
+
+
+def _pick_grep_tool(tool_names: set[str]) -> str:
+    """Return the grep tool name the client exposes, or the canonical handler."""
+    return "Grep" if "Grep" in tool_names else "grep"
+
+
+def _predict_file_mentions(user_content: str, tool_names: set[str]) -> tuple[list[AnticipatedTool], list[str]]:
     """Rule 1: file paths referenced in the prompt → read them."""
     raw = list(dict.fromkeys(_FILE_REF_RE.findall(user_content)))
     paths = [p for p in raw if _looks_like_project_path(p)]
+    read_tool = _pick_read_tool(tool_names)
     tools = [
-        AnticipatedTool(tool="read_file", args={"path": path}, reason="file mentioned in prompt", confidence=0.95)
+        AnticipatedTool(tool=read_tool, args={"path": path}, reason="file mentioned in prompt", confidence=0.95)
         for path in paths[:3]
     ]
     return tools, paths
 
 
-def _predict_stacktrace(user_content: str, existing: list[AnticipatedTool]) -> list[AnticipatedTool]:
+def _predict_stacktrace(
+    user_content: str, existing: list[AnticipatedTool], tool_names: set[str]
+) -> list[AnticipatedTool]:
     """Rule 2: stacktrace pasted → read files from the trace (skip dups)."""
     trace_files: list[str] = []
     for match in _STACKTRACE_RE.finditer(user_content):
@@ -160,27 +173,32 @@ def _predict_stacktrace(user_content: str, existing: list[AnticipatedTool]) -> l
         elif match.group(3):  # JS/TS: at foo (path:line)
             trace_files.append(match.group(3).split(":")[0])
     known = {t.args.get("path") for t in existing}
+    read_tool = _pick_read_tool(tool_names)
     return [
-        AnticipatedTool(tool="read_file", args={"path": path}, reason="file from stacktrace", confidence=0.93)
+        AnticipatedTool(tool=read_tool, args={"path": path}, reason="file from stacktrace", confidence=0.93)
         for path in list(dict.fromkeys(trace_files))[:2]
         if path not in known
     ]
 
 
-def _predict_grep_intent(prompt_lower: str) -> AnticipatedTool | None:
+def _predict_grep_intent(prompt_lower: str, tool_names: set[str]) -> AnticipatedTool | None:
     """Rules 3 & 4: search or error intent without known paths → grep."""
+    grep_tool = _pick_grep_tool(tool_names)
     if any(kw in prompt_lower for kw in _SEARCH_KEYWORDS):
-        return AnticipatedTool(tool="grep", args={}, reason="search intent detected", confidence=0.85)
+        return AnticipatedTool(tool=grep_tool, args={}, reason="search intent detected", confidence=0.85)
     if any(kw in prompt_lower for kw in _FIX_KEYWORDS):
-        return AnticipatedTool(tool="grep", args={}, reason="error/debug intent detected", confidence=0.80)
+        return AnticipatedTool(tool=grep_tool, args={}, reason="error/debug intent detected", confidence=0.80)
     return None
 
 
-def _predict_test_files(prompt_lower: str, paths: list[str], existing: list[AnticipatedTool]) -> list[AnticipatedTool]:
+def _predict_test_files(
+    prompt_lower: str, paths: list[str], existing: list[AnticipatedTool], tool_names: set[str]
+) -> list[AnticipatedTool]:
     """Rule 5: test intent → also read the likely test file for mentioned .py sources."""
     if not (any(kw in prompt_lower for kw in _TEST_KEYWORDS) and paths):
         return []
     known = {t.args.get("path") for t in existing}
+    read_tool = _pick_read_tool(tool_names)
     out: list[AnticipatedTool] = []
     for path in paths[:1]:
         name = path.rsplit("/", 1)[-1]
@@ -191,7 +209,7 @@ def _predict_test_files(prompt_lower: str, paths: list[str], existing: list[Anti
         if test_path not in known:
             out.append(
                 AnticipatedTool(
-                    tool="read_file",
+                    tool=read_tool,
                     args={"path": test_path},
                     reason="test intent: likely test file",
                     confidence=0.80,
@@ -200,22 +218,23 @@ def _predict_test_files(prompt_lower: str, paths: list[str], existing: list[Anti
     return out
 
 
-def _predict_from_rules(user_content: str) -> Prediction:
+def _predict_from_rules(user_content: str, tool_names: set[str]) -> Prediction:
     """Predict tool calls from prompt patterns — no LLM needed.
 
     Based on research: 90%+ of first tool calls are predictable from the prompt.
     Priority: file mentions > stacktrace > search intent > explain/fix/test intent.
+    Tool names emitted match what the client exposes (e.g. ``Read`` vs ``read_file``).
     """
-    tools, paths = _predict_file_mentions(user_content)
-    tools.extend(_predict_stacktrace(user_content, tools))
+    tools, paths = _predict_file_mentions(user_content, tool_names)
+    tools.extend(_predict_stacktrace(user_content, tools, tool_names))
 
     prompt_lower = user_content.lower()
     if not tools:
-        grep = _predict_grep_intent(prompt_lower)
+        grep = _predict_grep_intent(prompt_lower, tool_names)
         if grep is not None:
             tools.append(grep)
 
-    tools.extend(_predict_test_files(prompt_lower, paths, tools))
+    tools.extend(_predict_test_files(prompt_lower, paths, tools, tool_names))
 
     tools = tools[:3]
     if not tools:
@@ -295,12 +314,16 @@ class IntentionDetector:
         last = messages[-1]
         role = last.get("role", "")
 
-        # Phase 1: Rule-based prediction — if user mentions files, predict read_file
+        # Phase 1: Rule-based prediction — if user mentions files, predict read_file.
+        # We pass the client's tool names so the rules emit the exact name the
+        # client exposes (e.g. ``Read`` vs canonical ``read_file``). Otherwise the
+        # FAKE tool_use would carry a name the agent doesn't recognise.
+        tool_names = set(_extract_tool_names(available_tools))
         rule_prediction = _NULL_PREDICTION
         if role == "user":
             content = last.get("content", "")
             if content:
-                rule_prediction = _predict_from_rules(content)
+                rule_prediction = _predict_from_rules(content, tool_names)
 
         # Phase 2: LLM-based prediction — skip if:
         # - Rules already have high confidence (saves free LLM quota)

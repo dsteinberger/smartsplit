@@ -257,48 +257,70 @@ class TestNullPrediction:
 
 class TestPredictFromRules:
     def test_single_file(self):
-        prediction = _predict_from_rules("lis proxy.py")
+        prediction = _predict_from_rules("lis proxy.py", set())
         assert prediction.should_anticipate
         assert any(t.tool == "read_file" and t.args["path"] == "proxy.py" for t in prediction.tools)
 
     def test_multiple_files(self):
-        prediction = _predict_from_rules("compare proxy.py et router.py")
+        prediction = _predict_from_rules("compare proxy.py et router.py", set())
         assert prediction.should_anticipate
         paths = [t.args.get("path") for t in prediction.tools if t.tool == "read_file"]
         assert "proxy.py" in paths
         assert "router.py" in paths
 
     def test_no_files_no_intent(self):
-        prediction = _predict_from_rules("bonjour comment ca va")
+        prediction = _predict_from_rules("bonjour comment ca va", set())
         assert not prediction.should_anticipate
 
     def test_caps_at_3(self):
-        prediction = _predict_from_rules("look at a.py b.py c.py d.py e.py")
+        prediction = _predict_from_rules("look at a.py b.py c.py d.py e.py", set())
         assert prediction.should_anticipate
         assert len(prediction.tools) <= 3
 
     def test_stacktrace_extracts_files(self):
         trace = 'File "smartsplit/proxy.py", line 42, in handle\n  File "smartsplit/router.py", line 10'
-        prediction = _predict_from_rules("fix this error:\n" + trace)
+        prediction = _predict_from_rules("fix this error:\n" + trace, set())
         paths = [t.args.get("path") for t in prediction.tools if t.tool == "read_file"]
         assert "smartsplit/proxy.py" in paths
         assert "smartsplit/router.py" in paths
 
     def test_search_intent(self):
-        prediction = _predict_from_rules("find where the function is defined")
+        prediction = _predict_from_rules("find where the function is defined", set())
         assert prediction.should_anticipate
         assert any(t.tool == "grep" for t in prediction.tools)
 
     def test_test_intent_adds_test_file(self):
-        prediction = _predict_from_rules("write tests for proxy.py")
+        prediction = _predict_from_rules("write tests for proxy.py", set())
         paths = [t.args.get("path") for t in prediction.tools if t.tool == "read_file"]
         assert "proxy.py" in paths
         assert "test_proxy.py" in paths
 
     def test_error_intent_without_file(self):
-        prediction = _predict_from_rules("fix the TypeError in the code")
+        prediction = _predict_from_rules("fix the TypeError in the code", set())
         assert prediction.should_anticipate
         assert any(t.tool == "grep" for t in prediction.tools)
+
+    def test_read_tool_remaps_to_client_alias(self):
+        """When the client exposes ``Read``, rules must emit ``Read``, not ``read_file``."""
+        prediction = _predict_from_rules("lis proxy.py", {"Read"})
+        assert prediction.should_anticipate
+        assert all(t.tool == "Read" for t in prediction.tools if "path" in t.args)
+
+    def test_grep_tool_remaps_to_client_alias(self):
+        """When the client exposes ``Grep``, rules must emit ``Grep``, not ``grep``."""
+        prediction = _predict_from_rules("find where the function is defined", {"Grep"})
+        assert prediction.should_anticipate
+        assert any(t.tool == "Grep" for t in prediction.tools)
+
+    def test_stacktrace_remaps_to_client_alias(self):
+        trace = 'File "smartsplit/proxy.py", line 42, in handle'
+        prediction = _predict_from_rules("fix this error:\n" + trace, {"Read"})
+        assert prediction.should_anticipate
+        assert all(t.tool == "Read" for t in prediction.tools)
+
+    def test_test_intent_remaps_to_client_alias(self):
+        prediction = _predict_from_rules("write tests for proxy.py", {"Read"})
+        assert all(t.tool == "Read" for t in prediction.tools)
 
 
 # ── _merge_all ─────────────────────────────────────────────
