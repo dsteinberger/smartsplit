@@ -752,6 +752,19 @@ async def _handle_client(
                 host = target
                 port = 443
             await _handle_connect(ctx, ca_key, ca_cert, reader, writer, host, port)
+        elif first_line.startswith("GET /health"):
+            # Plain-HTTP liveness probe (Docker HEALTHCHECK, k8s). The proxy only
+            # speaks CONNECT for real traffic, but we expose /health on the same
+            # port so container orchestrators can check liveness without TLS.
+            body = b'{"status":"ok"}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+            writer.close()
         else:
             writer.write(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
             await writer.drain()
