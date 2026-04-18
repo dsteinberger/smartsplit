@@ -5,7 +5,7 @@ ifdef DEBUG
 endif
 
 .PHONY: help install install-proxy test lint format check run proxy setup-claude watch clean env \
-        docker-build docker-up docker-down docker-build-proxy docker-up-proxy docker-down-proxy
+        build up up-proxy down restart-proxy rebuild-proxy
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -48,27 +48,25 @@ setup-claude: ## One-time Claude Code setup (generates certs)
 watch: ## Run provider watch locally
 	uv run python scripts/provider_watch.py
 
-# ── Docker (API mode) ───────────────────────────────────────
+# ── Docker (proxy / API — même image) ───────────────────────
 
-docker-build: ## Build Docker image (API mode)
+build: ## Docker — build image
 	docker build -t smartsplit .
 
-docker-up: ## Start with Docker Compose — DEBUG=1 for verbose
-	docker compose up -d
+up: ## Docker — start API mode (DEBUG=1 for verbose)
+	docker compose up -d smartsplit
 
-docker-down: ## Stop Docker Compose
-	docker compose down
-
-# ── Docker (proxy mode) ─────────────────────────────────────
-
-docker-build-proxy: ## Build Docker image (proxy mode)
-	docker build -f Dockerfile.proxy -t smartsplit-proxy .
-
-docker-up-proxy: ## Start with Docker Compose (proxy mode)
+up-proxy: ## Docker — start proxy mode (HTTPS interception for Claude Code)
 	docker compose --profile proxy up -d proxy
 
-docker-down-proxy: ## Stop proxy service
+down: ## Docker — stop all services (API + proxy)
 	docker compose --profile proxy down
+
+restart-proxy: ## Docker — recreate proxy (fixes silent port-binding failures)
+	docker compose --profile proxy up -d --force-recreate proxy
+
+rebuild-proxy: ## Docker — rebuild image and recreate proxy (apply code changes)
+	docker compose --profile proxy up -d --build --force-recreate proxy
 
 # ── Setup ────────────────────────────────────────────────────
 

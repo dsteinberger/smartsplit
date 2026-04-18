@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, TypeVar
 
 import httpx
 
-from smartsplit.exceptions import NoProviderAvailableError, ProviderError
+from smartsplit.exceptions import (
+    NoProviderAvailableError,
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+)
 from smartsplit.models import ContextTier
 from smartsplit.providers.base import BaseProvider, LLMProvider, SearchProvider
 
@@ -42,23 +47,19 @@ _CB_FAILURE_WINDOW = 120  # 2 minutes window
 _CB_BASE_TIMEOUT = 60  # base cooldown (seconds)
 _CB_MAX_TIMEOUT = 1800  # max cooldown: 30 minutes
 _CB_SUCCESSES_TO_CLOSE = 3  # consecutive successes to fully reset backoff
+_RATE_LIMIT_SKIP_DEFAULT = 30.0  # default skip duration when no Retry-After is given
+_RATE_LIMIT_SKIP_MAX = 300.0  # cap on Retry-After to avoid pathological waits
 
 
 def _failure_weight(exc: Exception | None) -> float:
     """Return failure weight based on error type.
 
-    - Auth errors (401/403): immediate trip (weight = threshold)
-    - Rate limits (429): half weight (need ~10 to trip)
-    - Timeouts / server errors / other: normal weight (1.0)
+    Auth errors trip the breaker immediately — retrying with a broken key is
+    pointless. Rate limits never reach this path (they're handled via a short
+    skip window, not the breaker). Everything else counts as 1.0.
     """
-    if exc is None:
-        return 1.0
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        if status in (401, 403):
-            return float(_CB_FAILURE_THRESHOLD)
-        if status == 429:
-            return 0.5
+    if isinstance(exc, ProviderAuthError):
+        return float(_CB_FAILURE_THRESHOLD)
     return 1.0
 
 
@@ -83,6 +84,20 @@ class CircuitBreaker:
         self._consecutive_trips: dict[str, int] = {}
         self._half_open: set[str] = set()
         self._consecutive_successes: dict[str, int] = {}
+        # Short-lived per-provider skip triggered by rate limits (429).
+        # Independent from the breaker — a 429 means "slow down", not "I am down".
+        self._rate_limit_skip_until: dict[str, float] = {}
+
+    def record_rate_limit(self, provider: str, retry_after: float | None) -> None:
+        """Mark a provider as rate-limited; ``is_healthy`` will skip it until the window clears.
+
+        Does NOT touch the breaker state — rate limits are expected on free tiers
+        and should not feed into the infra-failure accounting.
+        """
+        wait = retry_after if retry_after is not None and retry_after > 0 else _RATE_LIMIT_SKIP_DEFAULT
+        wait = min(wait, _RATE_LIMIT_SKIP_MAX)
+        self._rate_limit_skip_until[provider] = time.time() + wait
+        logger.info("Rate limit hit on %s — skipping for %.0fs", provider, wait)
 
     def record_failure(self, provider: str, exc: Exception | None = None) -> None:
         """Record a provider failure and trip the breaker if threshold is reached."""
@@ -134,13 +149,20 @@ class CircuitBreaker:
 
     def is_healthy(self, provider: str) -> bool:
         """Return True if the provider accepts requests (CLOSED or entering HALF-OPEN)."""
+        now = time.time()
+        # Temporary rate-limit skip takes priority — don't probe, don't retry.
+        rl_deadline = self._rate_limit_skip_until.get(provider)
+        if rl_deadline is not None:
+            if now < rl_deadline:
+                return False
+            self._rate_limit_skip_until.pop(provider, None)
         # A probe is already in flight — block additional requests
         if provider in self._half_open:
             return False
         deadline = self._open_until.get(provider)
         if deadline is None:
             return True
-        if time.time() > deadline:
+        if now > deadline:
             self._open_until.pop(provider, None)
             self._half_open.add(provider)
             logger.info("Circuit breaker HALF-OPEN for %s — allowing probe request", provider)
@@ -303,6 +325,9 @@ class ProviderRegistry:
             except TimeoutError as e:
                 logger.warning("Brain candidate %r timed out after %ss (%s)", name, PROVIDER_CALL_TIMEOUT, op_name)
                 self.circuit_breaker.record_failure(name, e)
+            except ProviderRateLimitError as e:
+                logger.info("Brain candidate %r rate-limited (%s)", name, op_name)
+                self.circuit_breaker.record_rate_limit(name, e.retry_after)
             except Exception as e:
                 logger.warning(
                     "Brain candidate %r failed: %s: %s (%s)",
@@ -372,6 +397,9 @@ class ProviderRegistry:
             except TimeoutError as e:
                 logger.warning("Free LLM %s timed out after %ss", name, PROVIDER_CALL_TIMEOUT)
                 self.circuit_breaker.record_failure(name, e)
+            except ProviderRateLimitError as e:
+                logger.info("Free LLM %s rate-limited", name)
+                self.circuit_breaker.record_rate_limit(name, e.retry_after)
             except Exception as e:
                 logger.warning("Free LLM %s failed: %s: %s", name, type(e).__name__, _sanitize_error(e))
                 self.circuit_breaker.record_failure(name, e)

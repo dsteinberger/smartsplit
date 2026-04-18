@@ -10,7 +10,12 @@ import httpx
 import pytest
 
 from smartsplit.config import ProviderConfig
-from smartsplit.exceptions import NoProviderAvailableError, ProviderError
+from smartsplit.exceptions import (
+    NoProviderAvailableError,
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+)
 from smartsplit.models import ContextTier, TokenUsage
 from smartsplit.providers.anthropic_adapter import (
     anthropic_to_openai as _convert_from_anthropic,
@@ -292,29 +297,30 @@ class TestCircuitBreaker:
 
     def test_auth_error_trips_immediately(self, make_registry):
         cb = make_registry(["groq"]).circuit_breaker
-        exc = httpx.HTTPStatusError(
-            "",
-            request=httpx.Request("POST", "https://api.example.com"),
-            response=httpx.Response(401),
-        )
-        # Single auth error should trip (weight = threshold)
-        cb.record_failure("groq", exc)
+        # A typed auth error has threshold weight → single occurrence trips the breaker
+        cb.record_failure("groq", ProviderAuthError("groq", "HTTP 401"))
         assert cb.is_healthy("groq") is False
 
-    def test_rate_limit_half_weight(self, make_registry):
+    def test_rate_limit_triggers_short_skip_not_trip(self, make_registry):
+        """Rate limits should pause the provider briefly, not feed the infra-failure accounting."""
         cb = make_registry(["groq"]).circuit_breaker
-        exc = httpx.HTTPStatusError(
-            "",
-            request=httpx.Request("POST", "https://api.example.com"),
-            response=httpx.Response(429),
-        )
-        # 9 rate limits = 4.5 points < 5 threshold → still healthy
-        for _ in range(9):
-            cb.record_failure("groq", exc)
-        assert cb.is_healthy("groq") is True
-        # 10th pushes to 5.0 → trips
-        cb.record_failure("groq", exc)
+        cb.record_rate_limit("groq", retry_after=5.0)
         assert cb.is_healthy("groq") is False
+        # Still not tripped — breaker state untouched
+        cb._rate_limit_skip_until["groq"] = time.time() - 1  # simulate expiry
+        assert cb.is_healthy("groq") is True
+        # Even 10 rate limits in a row don't open the breaker (no failure recorded)
+        for _ in range(10):
+            cb.record_rate_limit("groq", retry_after=0.01)
+        assert "groq" not in cb._open_until
+
+    def test_rate_limit_without_retry_after_uses_default(self, make_registry):
+        cb = make_registry(["groq"]).circuit_breaker
+        cb.record_rate_limit("groq", retry_after=None)
+        assert cb.is_healthy("groq") is False
+        # Default skip is 30s — still active right after
+        remaining = cb._rate_limit_skip_until["groq"] - time.time()
+        assert 25 < remaining <= 30
 
     def test_get_unhealthy_includes_half_open(self, make_registry):
         cb = make_registry(["groq", "gemini"]).circuit_breaker
@@ -463,28 +469,14 @@ class TestHelpers:
         assert _failure_weight(None) == 1.0
 
     def test_failure_weight_auth_error(self):
-        exc = httpx.HTTPStatusError(
-            "",
-            request=httpx.Request("POST", "https://api.example.com"),
-            response=httpx.Response(401),
-        )
-        assert _failure_weight(exc) == 5.0
+        assert _failure_weight(ProviderAuthError("x", "HTTP 401")) == 5.0
 
     def test_failure_weight_forbidden_error(self):
-        exc = httpx.HTTPStatusError(
-            "",
-            request=httpx.Request("POST", "https://api.example.com"),
-            response=httpx.Response(403),
-        )
-        assert _failure_weight(exc) == 5.0
+        assert _failure_weight(ProviderAuthError("x", "HTTP 403")) == 5.0
 
-    def test_failure_weight_rate_limit(self):
-        exc = httpx.HTTPStatusError(
-            "",
-            request=httpx.Request("POST", "https://api.example.com"),
-            response=httpx.Response(429),
-        )
-        assert _failure_weight(exc) == 0.5
+    def test_failure_weight_rate_limit_is_normal(self):
+        """Rate limits are handled by record_rate_limit, not as failure weight."""
+        assert _failure_weight(ProviderRateLimitError("x", "HTTP 429", retry_after=10.0)) == 1.0
 
     def test_failure_weight_server_error(self):
         exc = httpx.HTTPStatusError(
@@ -496,6 +488,49 @@ class TestHelpers:
 
     def test_failure_weight_generic_exception(self):
         assert _failure_weight(RuntimeError("boom")) == 1.0
+
+
+class TestHttpErrorToProviderError:
+    """Regression tests for the status→exception-subclass mapping."""
+
+    def _mk(self, status: int, headers: dict | None = None) -> httpx.HTTPStatusError:
+        return httpx.HTTPStatusError(
+            "",
+            request=httpx.Request("POST", "https://api.example.com"),
+            response=httpx.Response(status, headers=headers or {}),
+        )
+
+    def test_401_becomes_auth_error(self):
+        from smartsplit.providers.base import http_error_to_provider_error
+
+        err = http_error_to_provider_error("cerebras", self._mk(401))
+        assert isinstance(err, ProviderAuthError)
+
+    def test_403_becomes_auth_error(self):
+        from smartsplit.providers.base import http_error_to_provider_error
+
+        err = http_error_to_provider_error("cerebras", self._mk(403))
+        assert isinstance(err, ProviderAuthError)
+
+    def test_429_becomes_rate_limit_error(self):
+        from smartsplit.providers.base import http_error_to_provider_error
+
+        err = http_error_to_provider_error("cerebras", self._mk(429, {"retry-after": "42"}))
+        assert isinstance(err, ProviderRateLimitError)
+        assert err.retry_after == 42.0
+
+    def test_429_without_retry_after(self):
+        from smartsplit.providers.base import http_error_to_provider_error
+
+        err = http_error_to_provider_error("cerebras", self._mk(429))
+        assert isinstance(err, ProviderRateLimitError)
+        assert err.retry_after is None
+
+    def test_500_stays_generic(self):
+        from smartsplit.providers.base import http_error_to_provider_error
+
+        err = http_error_to_provider_error("cerebras", self._mk(500))
+        assert type(err) is ProviderError
 
 
 # ── Anthropic conversion ───────────────────────────────────────

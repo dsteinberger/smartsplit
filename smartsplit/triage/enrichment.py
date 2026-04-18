@@ -144,12 +144,19 @@ def build_enriched_messages(
         "IMPORTANT: Always respond in the same language as the user's message above.]\n" + "\n".join(context_parts)
     )
 
-    # Inject into the last user message (deep copy to protect originals for fallback)
+    # Inject into the last user message (deep copy to protect originals for fallback).
+    # Preserve all original keys (tool_calls, tool_call_id, name) and append context to
+    # content — string content gets concatenated, list content (multimodal) gets a new
+    # text part appended.
     enriched = [copy.deepcopy(m) for m in original_messages]
     injected = False
     for i in range(len(enriched) - 1, -1, -1):
         if enriched[i]["role"] == "user":
-            enriched[i] = {"role": "user", "content": enriched[i]["content"] + context_block}
+            content = enriched[i].get("content")
+            if isinstance(content, list):
+                enriched[i]["content"] = content + [{"type": "text", "text": context_block}]
+            else:
+                enriched[i]["content"] = (content or "") + context_block
             injected = True
             break
 

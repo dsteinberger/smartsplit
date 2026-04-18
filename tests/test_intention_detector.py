@@ -322,6 +322,20 @@ class TestPredictFromRules:
         prediction = _predict_from_rules("write tests for proxy.py", {"Read"})
         assert all(t.tool == "Read" for t in prediction.tools)
 
+    def test_joined_paths_never_emitted_as_one(self):
+        """Prose notation `a.json/b.json` must never be emitted as a single concatenated path."""
+        prediction = _predict_from_rules("compare package.json/tsconfig.json for config", set())
+        paths = [t.args.get("path") for t in prediction.tools if t.tool == "read_file"]
+        assert "package.json/tsconfig.json" not in paths
+        assert "package.json" in paths
+        assert "tsconfig.json" in paths
+
+    def test_real_subpath_not_split(self):
+        """`src/main.py` is a real path — must stay intact, not be split on `/`."""
+        prediction = _predict_from_rules("read src/main.py please", set())
+        paths = [t.args.get("path") for t in prediction.tools if t.tool == "read_file"]
+        assert "src/main.py" in paths
+
 
 # ── _merge_all ─────────────────────────────────────────────
 
@@ -396,3 +410,36 @@ class TestMergeAll:
         # Rule tool has highest confidence (0.95 > 0.8), should be first after sort
         assert merged.tools[0].tool == "read_file"
         assert merged.tools[0].confidence == 0.95
+
+    def test_pattern_write_tool_is_filtered(self):
+        """Pattern learner may have observed write tools — they must never leak into predictions."""
+        detector = self._make_detector()
+        rule = Prediction(should_anticipate=False, confidence=0.0, tools=[])
+        llm = Prediction(should_anticipate=False, confidence=0.0, tools=[])
+        patterns = [
+            {"tool": "Write", "args": {"file_path": "x.py", "content": "..."}, "confidence": 0.95, "source": "seq"},
+            {"tool": "Bash", "args": {"command": "rm -rf /"}, "confidence": 0.95, "source": "seq"},
+            {"tool": "Read", "args": {"file_path": "x.py"}, "confidence": 0.9, "source": "seq"},
+        ]
+        merged = detector._merge_all(rule, llm, patterns)
+        tool_names = [t.tool for t in merged.tools]
+        assert "Write" not in tool_names
+        assert "Bash" not in tool_names
+        assert "Read" in tool_names
+
+    def test_final_safety_gate_drops_non_safe_tools(self):
+        """Even if a non-safe tool somehow makes it past per-source filters, the global gate catches it."""
+        detector = self._make_detector()
+        # Simulate a rule prediction bug: a non-safe tool leaks through
+        rule = Prediction(
+            should_anticipate=True,
+            confidence=0.95,
+            tools=[
+                AnticipatedTool(tool="Bash", args={"command": "ls"}, reason="bug", confidence=0.95),
+                AnticipatedTool(tool="Read", args={"path": "x.py"}, reason="rule", confidence=0.9),
+            ],
+        )
+        merged = detector._merge_all(rule, Prediction(should_anticipate=False, confidence=0.0, tools=[]), [])
+        tool_names = [t.tool for t in merged.tools]
+        assert "Bash" not in tool_names
+        assert "Read" in tool_names

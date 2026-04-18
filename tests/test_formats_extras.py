@@ -11,6 +11,7 @@ from smartsplit.proxy.formats import (
     build_fake_openai_tool_response,
     build_response,
     extract_anthropic_prompt,
+    is_internal_agent_call,
     openai_response_to_anthropic,
     response_to_sse_chunks,
     strip_agent_metadata,
@@ -64,6 +65,53 @@ class TestAnthropicHasToolResult:
     def test_false_when_no_user_message(self):
         body = {"messages": [{"role": "assistant", "content": "hello"}]}
         assert anthropic_has_tool_result(body) is False
+
+
+class TestIsInternalAgentCall:
+    def test_compaction_shape_matches(self):
+        body = {
+            "system": "Summarize the conversation below.",
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content": "..."}],
+        }
+        assert is_internal_agent_call(body) is True
+
+    def test_title_generator_shape_matches(self):
+        body = {
+            "system": "Generate a short session title.",
+            "max_tokens": 50,
+            "messages": [{"role": "user", "content": "..."}],
+        }
+        assert is_internal_agent_call(body) is True
+
+    def test_user_agent_call_with_huge_system_prompt_is_not_internal(self):
+        body = {
+            "system": [{"type": "text", "text": "x" * 20_000}],
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        assert is_internal_agent_call(body) is False
+
+    def test_user_request_with_default_max_tokens_is_not_internal(self):
+        body = {
+            "system": "small system",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": "What's React?"}],
+        }
+        assert is_internal_agent_call(body) is False
+
+    def test_missing_max_tokens_is_not_internal(self):
+        body = {"system": "small", "messages": [{"role": "user", "content": "hi"}]}
+        assert is_internal_agent_call(body) is False
+
+    def test_system_as_block_list_summed(self):
+        body = {
+            "system": [{"type": "text", "text": "a" * 1500}, {"type": "text", "text": "b" * 1600}],
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        # 1500 + 1600 = 3100 ≥ 3000 threshold → not internal
+        assert is_internal_agent_call(body) is False
 
 
 class TestAnthropicMessagesToOpenAI:

@@ -1,4 +1,4 @@
-"""Tests for SmartSplit — free multi-LLM backend."""
+"""Tests for SmartSplit — multi-LLM backend."""
 
 from __future__ import annotations
 

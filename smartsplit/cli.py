@@ -45,7 +45,7 @@ def _setup_claude() -> None:
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="SmartSplit — Free multi-LLM backend with intelligent routing",
+        description="SmartSplit — Multi-LLM backend with intelligent routing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
@@ -111,7 +111,7 @@ Proxy mode (Claude Code + subscription):
 
     app = create_app(mode=args.mode)
 
-    print("\n  SmartSplit — Free multi-LLM backend")
+    print("\n  SmartSplit — Multi-LLM backend")
     print(f"  http://{args.host}:{args.port}/v1")
     print(f"  Mode: {args.mode}")
     print()

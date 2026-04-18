@@ -5,16 +5,18 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY smartsplit/ smartsplit/
-RUN uv pip install --system --no-cache .
+RUN uv pip install --system --no-cache . cryptography
 
-RUN useradd -m -u 1000 smartsplit
+RUN useradd -m -u 1000 smartsplit \
+ && mkdir -p /certs && chown smartsplit:smartsplit /certs
 USER smartsplit
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    SMARTSPLIT_CERT_DIR=/certs
 EXPOSE 8420
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD python -c "import httpx; httpx.get('http://localhost:8420/health').raise_for_status()" || exit 1
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8420/health')" || exit 1
 
 ENTRYPOINT ["python", "-m", "smartsplit"]
 CMD ["--host", "0.0.0.0", "--port", "8420"]

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from smartsplit.exceptions import ProviderError
+from smartsplit.exceptions import ProviderAuthError, ProviderError, ProviderRateLimitError
 from smartsplit.models import TokenUsage
 
 if TYPE_CHECKING:
@@ -27,6 +27,41 @@ def _http_error_message(e: httpx.HTTPStatusError) -> str:
     if detail:
         msg += f": {detail}"
     return msg
+
+
+def _parse_retry_after(e: httpx.HTTPStatusError) -> float | None:
+    """Extract ``Retry-After`` in seconds from a response. Supports integer and HTTP-date forms."""
+    raw = e.response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+
+        try:
+            import time as _time
+
+            dt = parsedate_to_datetime(raw)
+            return max(0.0, dt.timestamp() - _time.time())
+        except (TypeError, ValueError):
+            return None
+
+
+def http_error_to_provider_error(provider: str, e: httpx.HTTPStatusError) -> ProviderError:
+    """Convert an ``httpx.HTTPStatusError`` to the most specific ``ProviderError`` subclass.
+
+    Maps 401/403 → ``ProviderAuthError`` (config problem, stop retrying) and
+    429 → ``ProviderRateLimitError`` (transient, skip briefly). All other
+    statuses become a generic ``ProviderError``.
+    """
+    msg = _http_error_message(e)
+    status = e.response.status_code
+    if status in (401, 403):
+        return ProviderAuthError(provider, msg)
+    if status == 429:
+        return ProviderRateLimitError(provider, msg, retry_after=_parse_retry_after(e))
+    return ProviderError(provider, msg)
 
 
 def _extract_usage(data: dict) -> TokenUsage:
@@ -143,7 +178,7 @@ class OpenAICompatibleProvider(LLMProvider):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, _http_error_message(e)) from e
+            raise http_error_to_provider_error(self.name, e) from e
         except httpx.TimeoutException as e:
             raise ProviderError(self.name, "Request timed out") from e
         try:
@@ -166,7 +201,7 @@ class OpenAICompatibleProvider(LLMProvider):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, _http_error_message(e)) from e
+            raise http_error_to_provider_error(self.name, e) from e
         except httpx.TimeoutException as e:
             raise ProviderError(self.name, "Request timed out") from e
         try:

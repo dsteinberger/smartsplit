@@ -15,6 +15,9 @@ from smartsplit.tools.registry import (
     SMART_TOOLS,
     TOOL_ALIAS,
     WRITE_TOOLS,
+    adapt_args_to_schema,
+    extract_tool_schemas,
+    has_required_args,
 )
 
 
@@ -126,3 +129,99 @@ class TestDetectorAlignment:
         from smartsplit.tools.intention_detector import SAFE_TOOLS as DETECTOR_SAFE_TOOLS
 
         assert DETECTOR_SAFE_TOOLS is SAFE_TOOLS
+
+
+# ── Argument adaptation from client-provided schemas ────────────────
+
+
+class TestExtractToolSchemas:
+    def test_openai_format(self):
+        """OpenAI shape: tools[].function.parameters."""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "parameters": {
+                        "type": "object",
+                        "required": ["file_path"],
+                        "properties": {"file_path": {"type": "string"}, "limit": {"type": "integer"}},
+                    },
+                },
+            }
+        ]
+        out = extract_tool_schemas(tools)
+        assert "Read" in out
+        assert out["Read"]["required"] == {"file_path"}
+        assert out["Read"]["properties"] == {"file_path", "limit"}
+
+    def test_anthropic_format(self):
+        """Anthropic shape: tools[].input_schema."""
+        tools = [
+            {
+                "name": "Grep",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["pattern"],
+                    "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+                },
+            }
+        ]
+        out = extract_tool_schemas(tools)
+        assert out["Grep"]["required"] == {"pattern"}
+        assert out["Grep"]["properties"] == {"pattern", "path"}
+
+    def test_handles_missing_fields(self):
+        """Tools without schema or name should not crash."""
+        out = extract_tool_schemas([{"function": {"name": "NoParams"}}, {"not_a_tool": True}])
+        assert out["NoParams"] == {"required": set(), "properties": set()}
+
+    def test_none_input(self):
+        assert extract_tool_schemas(None) == {}
+
+
+class TestAdaptArgsToSchema:
+    def test_rename_path_to_file_path_for_claude_code(self):
+        """``Read`` on Claude Code expects ``file_path``; predictions use ``path``."""
+        schema = {"required": {"file_path"}, "properties": {"file_path", "limit"}}
+        out = adapt_args_to_schema({"path": "x.py"}, schema)
+        assert out == {"file_path": "x.py"}
+
+    def test_keep_exact_match(self):
+        """If the prediction key is already in properties, keep it as-is."""
+        schema = {"required": {"path"}, "properties": {"path"}}
+        out = adapt_args_to_schema({"path": "x.py"}, schema)
+        assert out == {"path": "x.py"}
+
+    def test_drop_unknown_keys(self):
+        """Keys with no match in properties (and no known synonym) are dropped."""
+        schema = {"required": {"pattern"}, "properties": {"pattern", "path"}}
+        out = adapt_args_to_schema({"files": ["x"]}, schema)
+        assert out == {}
+
+    def test_no_schema_passes_through(self):
+        """Without a schema, we can't remap — return a copy as-is."""
+        assert adapt_args_to_schema({"path": "x"}, None) == {"path": "x"}
+
+    def test_camelcase_synonym(self):
+        schema = {"required": {"filePath"}, "properties": {"filePath"}}
+        assert adapt_args_to_schema({"path": "x.py"}, schema) == {"filePath": "x.py"}
+
+
+class TestHasRequiredArgs:
+    def test_missing_required_is_false(self):
+        schema = {"required": {"pattern"}, "properties": {"pattern"}}
+        assert not has_required_args({}, schema)
+
+    def test_all_required_present(self):
+        schema = {"required": {"file_path"}, "properties": {"file_path"}}
+        assert has_required_args({"file_path": "x.py"}, schema)
+
+    def test_no_schema_accepts_anything(self):
+        """When no schema is declared, we can't validate — accept."""
+        assert has_required_args({"anything": 1}, None)
+
+    def test_extra_args_ok(self):
+        """Extra args beyond required are fine."""
+        schema = {"required": {"file_path"}, "properties": {"file_path", "limit"}}
+        assert has_required_args({"file_path": "x.py", "limit": 100}, schema)

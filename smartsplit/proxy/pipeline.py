@@ -1,4 +1,4 @@
-"""SmartSplit — Free multi-LLM backend with intelligent routing.
+"""SmartSplit — Multi-LLM backend with intelligent routing.
 
 An OpenAI-compatible endpoint that routes every request to the best free LLM
 for the task. Works as a drop-in backend for Continue, Cline, Aider, or any
@@ -56,6 +56,7 @@ from smartsplit.proxy.formats import (
     extract_anthropic_prompt,
     extract_prompt,
     inject_anthropic_system_context,
+    is_internal_agent_call,
     iter_sse,
     openai_response_to_anthropic,
     response_to_sse_chunks,
@@ -71,6 +72,7 @@ from smartsplit.tools.anticipation import (
 from smartsplit.tools.anticipator import ToolAnticipator
 from smartsplit.tools.intention_detector import FAKE_TOOL_CONFIDENCE, IntentionDetector
 from smartsplit.tools.pattern_learner import ToolPatternLearner
+from smartsplit.tools.registry import adapt_args_to_schema, extract_tool_schemas, has_required_args
 from smartsplit.triage.detector import LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
 from smartsplit.triage.enrichment import (
     build_enriched_messages,
@@ -264,9 +266,23 @@ async def _try_fake_tool_use(ctx: ProxyContext, body_dict: dict, request_id: str
     if not openai_body:
         return None
     prediction = await ctx.detector.predict(openai_body.get("messages", []), openai_body.get("tools"))
-    fake_tools = [
-        {"tool": t.tool, "input": dict(t.args)} for t in prediction.tools if t.confidence >= FAKE_TOOL_CONFIDENCE
-    ]
+    schemas = extract_tool_schemas(openai_body.get("tools"))
+    fake_tools: list[dict[str, object]] = []
+    for t in prediction.tools:
+        if t.confidence < FAKE_TOOL_CONFIDENCE:
+            continue
+        schema = schemas.get(t.tool)
+        adapted = adapt_args_to_schema(dict(t.args), schema)
+        if not has_required_args(adapted, schema):
+            logger.info(
+                "[%s] Dropping FAKE %s — missing required args: got %s, need %s",
+                request_id,
+                t.tool,
+                sorted(adapted.keys()),
+                sorted(schema.get("required", [])) if schema else [],
+            )
+            continue
+        fake_tools.append({"tool": t.tool, "input": adapted})
     if not fake_tools:
         return None
     ctx.anticipation_stats["predictions_made"] += 1
@@ -374,6 +390,13 @@ async def _run_pipeline(
       {"type": "modified", "body": dict} — body was modified (context injected)
       {"type": "passthrough"}            — nothing to do
     """
+    # Agent-internal background calls (auto-compact, title gen, task tracker, …)
+    # are text-generation requests the user never typed — forward as-is to avoid
+    # polluting their context with enrichment and wasting free LLM budget on them.
+    if is_internal_agent_call(body_dict):
+        logger.debug("[%s] Internal agent call detected — skipping pipeline", request_id)
+        return {"type": "passthrough"}
+
     prompt = extract_anthropic_prompt(body_dict)
     triage_prompt = strip_agent_metadata(prompt)
     model = body_dict.get("model", "")
@@ -767,11 +790,23 @@ async def _handle_agent_mode(
         # FAKE tool_use: predict read-only tools and return without hitting the brain.
         if ctx.detector and not has_tool_result:
             prediction = await ctx.detector.predict(body_dict.get("messages", []), parsed.tools)
-            fake_tools = [
-                {"tool": t.tool, "input": dict(t.args)}
-                for t in prediction.tools
-                if t.confidence >= FAKE_TOOL_CONFIDENCE
-            ]
+            schemas = extract_tool_schemas(parsed.tools)
+            fake_tools: list[dict[str, object]] = []
+            for t in prediction.tools:
+                if t.confidence < FAKE_TOOL_CONFIDENCE:
+                    continue
+                schema = schemas.get(t.tool)
+                adapted = adapt_args_to_schema(dict(t.args), schema)
+                if not has_required_args(adapted, schema):
+                    logger.info(
+                        "[%s] Dropping FAKE %s — missing required args: got %s, need %s",
+                        request_id,
+                        t.tool,
+                        sorted(adapted.keys()),
+                        sorted(schema.get("required", [])) if schema else [],
+                    )
+                    continue
+                fake_tools.append({"tool": t.tool, "input": adapted})
             if fake_tools:
                 ctx.anticipation_stats["predictions_made"] += 1
                 logger.info(
@@ -791,7 +826,9 @@ async def _handle_agent_mode(
         if enrichment_task:
             enrichment_results = await enrichment_task
             if enrichment_results:
-                body_dict["messages"] = build_enriched_messages(raw_messages, prompt, enrichment_results)
+                body_dict["messages"] = build_enriched_messages(
+                    body_dict.get("messages", []), prompt, enrichment_results
+                )
                 logger.info("[%s] Enriched agent request with %s worker results", request_id, len(enrichment_results))
 
         raw_response = await ctx.registry.proxy_to_brain(body_dict)

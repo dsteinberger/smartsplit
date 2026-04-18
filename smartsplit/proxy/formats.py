@@ -18,7 +18,10 @@ class OpenAIMessage(BaseModel):
     """A single message in the OpenAI chat format."""
 
     role: str
-    content: str | None = None
+    # Content can be a string (text-only) or a list of content parts
+    # (multimodal — text + image_url, e.g. GPT-4o vision). Both shapes are
+    # forwarded as-is to providers that support them.
+    content: str | list[dict[str, object]] | None = None
     # Tool use fields — preserved for agent loop passthrough
     tool_calls: list[dict[str, object]] | None = None
     tool_call_id: str | None = None
@@ -79,10 +82,22 @@ def strip_agent_metadata(text: str) -> str:
 
 
 def extract_prompt(request: OpenAIRequest) -> str:
-    """Extract the user's prompt from an OpenAI-format request."""
+    """Extract the user's prompt text from an OpenAI-format request.
+
+    Returns the text of the latest user message. For multimodal content (a list
+    of parts), concatenates the text parts — non-text parts (images, audio) are
+    ignored here because this is used for triage and prediction only.
+    """
     for msg in reversed(request.messages):
-        if msg.role == "user" and msg.content:
+        if msg.role != "user" or not msg.content:
+            continue
+        if isinstance(msg.content, str):
             return msg.content
+        if isinstance(msg.content, list):
+            text_parts = [p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"]
+            joined = " ".join(t for t in text_parts if t)
+            if joined:
+                return joined
     return ""
 
 
@@ -285,6 +300,43 @@ def anthropic_has_tools(body: dict) -> bool:
     """Check whether an Anthropic request includes tool definitions."""
     tools = body.get("tools")
     return isinstance(tools, list) and len(tools) > 0
+
+
+# Structural thresholds for detecting agent-internal calls (auto-compact, title gen,
+# task tracker, etc.). User-initiated agent calls ship a large system prompt
+# (CLAUDE.md + tool descriptions, typically >10KB) and leave max_tokens at the
+# client default (≥4096). Internal calls use a short dedicated system prompt and
+# a capped output. Thresholds are conservative to avoid false positives on short
+# legitimate user requests.
+_INTERNAL_CALL_SYSTEM_CHARS = 3000
+_INTERNAL_CALL_MAX_TOKENS = 1024
+
+
+def _system_prompt_chars(body: dict) -> int:
+    """Return the total character count of the Anthropic ``system`` field."""
+    system = body.get("system", "")
+    if isinstance(system, list):
+        return sum(len(str(b.get("text", ""))) for b in system if isinstance(b, dict))
+    return len(str(system))
+
+
+def is_internal_agent_call(body: dict) -> bool:
+    """Heuristic: does this request look like a client-internal background call?
+
+    Agents (Claude Code, Cline, Aider, …) send non-user background requests for
+    compaction, title generation, task tracking, suggestions, etc. These share
+    a structural fingerprint distinct from user-initiated agent calls:
+      - Short dedicated ``system`` prompt (no CLAUDE.md / tool descriptions dump)
+      - Low ``max_tokens`` cap (the expected output is a short string)
+
+    When both signals fire, SmartSplit should skip enrichment and prediction
+    entirely and forward the request as-is. Enriching an internal call pollutes
+    its context and burns free LLM budget on a request the user never made.
+    """
+    max_tokens = body.get("max_tokens") or 0
+    if not (0 < max_tokens < _INTERNAL_CALL_MAX_TOKENS):
+        return False
+    return _system_prompt_chars(body) < _INTERNAL_CALL_SYSTEM_CHARS
 
 
 def anthropic_has_tool_named(body: dict, *names: str) -> bool:

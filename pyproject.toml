@@ -1,7 +1,7 @@
 [project]
 name = "smartsplit"
 version = "0.1.0"
-description = "Free multi-LLM backend — decompose prompts into subtasks and route to the best free model for each task"
+description = "Multi-LLM backend — decompose prompts into subtasks and route to the best model for each task"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "David Steinberger"}]

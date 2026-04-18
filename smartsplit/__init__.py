@@ -1,6 +1,6 @@
-"""SmartSplit — Free multi-LLM backend with intelligent routing.
+"""SmartSplit — Multi-LLM backend with intelligent routing.
 
-Routes each request to the best free LLM for the task.
+Routes each request to the best LLM for the task.
 """
 
 from __future__ import annotations

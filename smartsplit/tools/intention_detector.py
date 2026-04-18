@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from smartsplit.exceptions import SmartSplitError
 from smartsplit.json_utils import extract_json
 from smartsplit.tools.registry import FILE_REF_RE as _FILE_REF_RE
-from smartsplit.tools.registry import SAFE_TOOLS
+from smartsplit.tools.registry import SAFE_TOOLS, extract_tool_schemas, split_joined_paths
 from smartsplit.tools.registry import WELL_KNOWN_FILES as _WELL_KNOWN_FILES
 from smartsplit.triage.i18n_keywords import INTENT_KEYWORDS_I18N
 
@@ -152,7 +152,11 @@ def _pick_grep_tool(tool_names: set[str]) -> str:
 
 def _predict_file_mentions(user_content: str, tool_names: set[str]) -> tuple[list[AnticipatedTool], list[str]]:
     """Rule 1: file paths referenced in the prompt → read them."""
-    raw = list(dict.fromkeys(_FILE_REF_RE.findall(user_content)))
+    matched = _FILE_REF_RE.findall(user_content)
+    expanded: list[str] = []
+    for m in matched:
+        expanded.extend(split_joined_paths(m))
+    raw = list(dict.fromkeys(expanded))
     paths = [p for p in raw if _looks_like_project_path(p)]
     read_tool = _pick_read_tool(tool_names)
     tools = [
@@ -256,14 +260,17 @@ _PREDICT_FROM_USER_TEMPLATE = (
     "list of available tools, predict which READ-ONLY tools the assistant will call first.\n\n"
     "You may ONLY predict these safe tools: {safe_tools}\n\n"
     "Available tools in this session: {available_tools}\n\n"
+    "Tool schemas (you MUST supply every required argument):\n{tool_schemas}\n\n"
     "Rules:\n"
     "- Predict ONLY read-only tools (file reads, searches, directory listings)\n"
     "- Do NOT predict write tools (edit, write, execute, delete, etc.)\n"
+    "- You MUST provide ALL required arguments for each predicted tool\n"
+    "- If you cannot infer a required argument from the message, DO NOT predict that tool\n"
     "- Be conservative — only predict calls you are highly confident about\n"
     "- Maximum 3 predictions\n\n"
     "Respond with ONLY this JSON (no other text):\n"
     '{{"should_anticipate": true/false, "confidence": 0.0-1.0, "anticipated_tools": ['
-    '{{"tool": "tool_name", "args": {{}}, "reason": "why", "confidence": 0.0-1.0}}]}}\n\n'
+    '{{"tool": "tool_name", "args": {{"required_key": "value"}}, "reason": "why", "confidence": 0.0-1.0}}]}}\n\n'
     "--- USER MESSAGE ---\n"
 )
 
@@ -389,8 +396,14 @@ class IntentionDetector:
                 all_tools.append(t)
                 seen_keys.add(key)
 
-        # Add pattern suggestions (skip duplicates)
+        # Add pattern suggestions (skip duplicates and non-safe tools)
         for s in pattern_suggestions:
+            tool_name = s.get("tool")
+            # Hard safety gate: patterns can learn write tools from observed sessions,
+            # but anticipating them would execute arbitrary shell / file writes.
+            if tool_name not in SAFE_TOOLS:
+                logger.debug("Skipping non-safe pattern suggestion: %s", tool_name)
+                continue
             raw_args = s.get("args", {})
             if isinstance(raw_args, str):
                 try:
@@ -399,17 +412,26 @@ class IntentionDetector:
                     raw_args = {}
             if not isinstance(raw_args, dict):
                 raw_args = {}
-            key = s["tool"] + ":" + str(raw_args.get("path", ""))
+            key = str(tool_name) + ":" + str(raw_args.get("path", ""))
             if key not in seen_keys:
                 all_tools.append(
                     AnticipatedTool(
-                        tool=s["tool"],
+                        tool=str(tool_name),
                         args=raw_args,
                         reason="pattern:" + s.get("source", "learned"),
                         confidence=s.get("confidence", 0.7),
                     )
                 )
                 seen_keys.add(key)
+
+        # Final safety gate (defense in depth): SAFE_TOOLS only, whatever the source.
+        # Rules produce only safe tools by construction and LLM predictions are
+        # filtered in _call_and_parse, but a global filter here guarantees no
+        # write tool can slip through if those paths ever change.
+        before = len(all_tools)
+        all_tools = [t for t in all_tools if t.tool in SAFE_TOOLS]
+        if len(all_tools) < before:
+            logger.warning("Merged prediction: dropped %d non-safe tool(s)", before - len(all_tools))
 
         # Sort by confidence, cap at 3
         all_tools.sort(key=lambda t: t.confidence, reverse=True)
@@ -440,8 +462,11 @@ class IntentionDetector:
 
         safe_str = ", ".join(safe_tool_names)
         avail_str = ", ".join(tool_names) if tool_names else "(not specified)"
+        schemas_str = _format_tool_schemas_for_prompt(available_tools, safe_tool_names)
         prompt = (
-            _PREDICT_FROM_USER_TEMPLATE.replace("{safe_tools}", safe_str).replace("{available_tools}", avail_str)
+            _PREDICT_FROM_USER_TEMPLATE.replace("{safe_tools}", safe_str)
+            .replace("{available_tools}", avail_str)
+            .replace("{tool_schemas}", schemas_str)
             + user_content[:2000]
         )
 
@@ -526,6 +551,27 @@ class IntentionDetector:
 
 
 # ── Helpers ─────────────────────────────────────────────────
+
+
+def _format_tool_schemas_for_prompt(tools: list[dict[str, str]] | None, safe_tool_names: list[str]) -> str:
+    """Format required/optional args per tool so the LLM knows what to emit."""
+    schemas = extract_tool_schemas(tools)
+    lines: list[str] = []
+    for name in safe_tool_names:
+        schema = schemas.get(name)
+        if not schema:
+            continue
+        required = sorted(schema.get("required", set()))
+        properties = sorted(schema.get("properties", set()))
+        optional = [p for p in properties if p not in required]
+        parts: list[str] = []
+        if required:
+            parts.append("required=[" + ", ".join(required) + "]")
+        if optional:
+            parts.append("optional=[" + ", ".join(optional) + "]")
+        if parts:
+            lines.append("- " + name + ": " + ", ".join(parts))
+    return "\n".join(lines) if lines else "(no schema information available)"
 
 
 def _extract_tool_names(available_tools: list[dict[str, str]] | None) -> list[str]:
