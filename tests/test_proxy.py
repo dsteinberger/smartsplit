@@ -129,6 +129,20 @@ _TRANSPARENT_CASES = [
         expected="transparent",
         id="long_single_domain",
     ),
+    # Below _ENRICH_MIN_CHARS (50) — stays transparent even with analysis keyword
+    DetectorCase(
+        prompt="Refactor this",
+        expected="transparent",
+        id="short_analysis_keyword",
+    ),
+    # Just above _ENRICH_MIN_CHARS but short of _PRE_ANALYSIS_MIN_CHARS (120) and no compare keyword
+    DetectorCase(
+        prompt="Can you help me write a function that squares numbers?",
+        expected="transparent",
+        id="medium_no_trigger",
+    ),
+    # Short web_search prompt (< 50 chars) stays ENRICH because web_search is detected
+    # BEFORE the length filter. Kept in ENRICH_CASES below, not here — this is just a doc note.
     # Large system message (IDE-injected file) should NOT trigger context_summary
     DetectorCase(
         prompt="What do you think?",
@@ -147,6 +161,21 @@ _ENRICH_CASES = [
     # Web search — even short prompts
     DetectorCase(
         prompt="Who won the latest F1 race in 2026?", expected="enrich", expected_types=["web_search"], id="web_short"
+    ),
+    # Regression guard: short web_search prompt bypasses the length filter (< _ENRICH_MIN_CHARS)
+    DetectorCase(
+        prompt="latest AI news 2026",
+        expected="enrich",
+        expected_types=["web_search"],
+        id="web_very_short_bypasses_length",
+    ),
+    # New 130-char pre_analysis case — previously TRANSPARENT (under old 200 threshold),
+    # now ENRICH since we lowered _PRE_ANALYSIS_MIN_CHARS to 120.
+    DetectorCase(
+        prompt="Please refactor this payment function to handle currency rounding, null amounts, and concurrent update edge cases safely.",
+        expected="enrich",
+        expected_types=["pre_analysis"],
+        id="pre_analysis_medium_length",
     ),
     DetectorCase(
         prompt="What happened in tech news today?", expected="enrich", expected_types=["web_search"], id="web_today"

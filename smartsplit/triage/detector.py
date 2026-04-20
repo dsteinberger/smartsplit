@@ -25,8 +25,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("smartsplit.detector")
 
-# Minimum prompt length worth enriching
-_ENRICH_MIN_CHARS = 80
+# Minimum prompt length worth enriching (under this, signal/noise is too low)
+_ENRICH_MIN_CHARS = 50
+
+# Minimum prompt length for keyword-triggered pre_analysis
+_PRE_ANALYSIS_MIN_CHARS = 120
 
 # Conversation size thresholds for context summary enrichment
 _LONG_HISTORY_MESSAGES = 10
@@ -132,11 +135,11 @@ def detect(
         enrichments.append("multi_perspective")
 
     # Complex analysis prompts
-    if any(kw in prompt_lower for kw in _ANALYSIS_KEYWORDS) and len(prompt.strip()) > 200:
+    if any(kw in prompt_lower for kw in _ANALYSIS_KEYWORDS) and len(prompt.strip()) > _PRE_ANALYSIS_MIN_CHARS:
         enrichments.append("pre_analysis")
 
     # Multi-domain prompt (code + translation, math + writing, etc.)
-    if len(domain_names) >= 2 and len(prompt.strip()) > 200 and "pre_analysis" not in enrichments:
+    if len(domain_names) >= 2 and len(prompt.strip()) > _PRE_ANALYSIS_MIN_CHARS and "pre_analysis" not in enrichments:
         enrichments.append("pre_analysis")
 
     if enrichments:
@@ -163,10 +166,12 @@ Valid enrichment types:
 - "pre_analysis" — prompt requires deep analysis of complex code/architecture
 
 Rules:
-- MOST prompts are "transparent" — only enrich when it clearly adds value
-- "web_search" when real-world data improves the answer: finding projects, tools, libraries, current versions, news, benchmarks, documentation
-- NOT web_search: explaining concepts, writing code, answering from general knowledge, simple opinions
-- Code tasks, explanations, and simple questions are always transparent
+- Enrich when workers would meaningfully help the answer — otherwise keep it transparent.
+- "web_search" when real-world data would make the answer BETTER: current versions, recent news, benchmarks, finding projects/tools/libraries, up-to-date documentation.
+- NOT web_search: explaining well-known concepts, writing code from a clear spec, answering from general knowledge.
+- "multi_perspective" when the user is weighing options, frameworks, or approaches against each other (compare, vs, which is better, tradeoffs).
+- "pre_analysis" when the request involves deep analysis (refactor a module, review complex code/arch, audit for issues) AND has enough context to analyze (not a one-liner).
+- Simple questions and short prompts stay transparent.
 
 Respond with ONLY the JSON object, nothing else.
 Example: {"decision": "enrich", "enrichments": ["web_search"]}
