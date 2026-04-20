@@ -81,7 +81,9 @@ Everything else                     → Free models first
 
 **Read‑only by design.** SmartSplit only anticipates *reads* — files, greps, web searches. It never writes, never edits, never executes. Sandboxed to your working directory, 5s timeout, no exceptions. Safer than your own shell.
 
-**Web-aware in 9 languages.** When your prompt needs current data — in English, French, Spanish, Portuguese, German, Chinese, Japanese, Korean, or Russian — SmartSplit detects it, searches the web, and feeds the result to your brain. No plugin, no config.
+**Web-aware in 9 languages.** When your prompt needs current data — in English, French, Spanish, Portuguese, German, Chinese, Japanese, Korean, or Russian — SmartSplit detects it, runs a **mini research agent** (plan queries → search → read & synthesize → optional gap-fill) under a strict 7 s budget, and feeds *sourced findings* to your brain. Each fact arrives with a confidence level and a URL, not a blob of snippets. If any step times out, the pipeline gracefully degrades to raw snippets — never blocks the response.
+
+**Domain-specialized analysis.** When your prompt needs deep pre-analysis or a multi-perspective comparison, SmartSplit picks the right template for the detected domain — code, math, creative, writing, factual — and routes the work to the worker that's strongest on *that specific combination* (e.g. `reasoning.math` prefers Gemini/DeepSeek, `reasoning.creative` prefers Claude/Mistral). One less generic "please analyze" prompt, one more structured checklist the brain can cite.
 
 **One format, any backend.** Your tool talks OpenAI. SmartSplit translates to Anthropic, Gemini, or whatever brain you configure — SSE streaming preserved. Swap the engine without swapping the wheel.
 
@@ -254,10 +256,10 @@ flowchart TD
     A -->|"No"| DET{"Triage"}
     DET -->|"TRANSPARENT"| BRAIN(["Brain LLM"])
     DET -->|"ENRICH"| EN["Workers run in parallel"]
-    EN --> WEB["Web search"]
-    EN --> ANA["Pre-analysis"]
-    EN --> CMP["Multi-perspective"]
-    WEB --> INJ["Inject results into request"]
+    EN --> WEB["Research agent<br/>PLAN → SEARCH → READ → GAP"]
+    EN --> ANA["Pre-analysis<br/>(domain-specialized template)"]
+    EN --> CMP["Multi-perspective<br/>(domain-specialized template)"]
+    WEB --> INJ["Inject structured<br/>findings into request"]
     ANA --> INJ
     CMP --> INJ
     INJ --> BRAIN
@@ -291,12 +293,17 @@ Without tools, SmartSplit goes straight to triage: **TRANSPARENT** (forward dire
 ```
 "What are the new features in Python 3.13?"
 
-  [web_search]        → search engine
-  [pre_analysis]      → reasoning worker
-  [multi_perspective] → comparison worker
+  [web_search]        → mini research agent (PLAN → SEARCH → READ → GAP)
+                        → sourced findings: FACT (high): ... [source: url]
+  [pre_analysis]      → domain-aware worker (code / math / creative / …)
+                        → structured markdown: ## Invariants, ## Edge cases, …
+  [multi_perspective] → domain-aware worker
+                        → per-option: Claim / Evidence / Cost / Who-it-fits
 
-  → Brain gets enriched context, responds with current data
+  → Brain gets structured, sourced context injected as labelled sections
 ```
+
+Each enrichment has a hard time budget and degrades gracefully — if research times out it falls back to raw snippets; if a worker fails, the other sections still reach the brain. The request is never blocked by a slow worker.
 
 ### Built-in reliability
 
@@ -305,8 +312,9 @@ Without tools, SmartSplit goes straight to triage: **TRANSPARENT** (forward dire
 | **Circuit breaker** | 5 failures in 2 min → provider auto-disabled with exponential backoff |
 | **Quality gates** | Detects refusals ("I cannot...") → auto-escalation to next provider |
 | **Fallback chains** | Provider fails → next best one takes over, seamlessly |
+| **Research budget** | Mini research agent capped at 7 s; each step (plan/search/read/gap) degrades to the previous one on timeout — never blocks the request |
 | **Pattern learning** | Learns from actual tool calls (Wilson score) → better predictions over time |
-| **Adaptive scoring** | Learns which providers work best from real results (MAB/UCB1) |
+| **Adaptive scoring** | Learns which providers work best from real results (MAB/UCB1), per-domain when a `reasoning.<domain>` row is configured |
 
 ---
 
@@ -438,6 +446,8 @@ You can also tune provider settings and routing:
 {
   "mode": "balanced",
   "worker_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
+  "research_budget_seconds": 7.0,
+  "research_enabled": true,
   "providers": {
     "groq": {
       "model": "llama-3.3-70b-versatile",
@@ -454,6 +464,8 @@ You can also tune provider settings and routing:
 | Option | Default | What it does |
 |--------|---------|-------------|
 | `worker_priority` | cerebras, groq, gemini, openrouter, mistral, huggingface, cloudflare | Fallback order for worker LLM calls. Paid providers (DeepSeek, OpenAI, ...) are welcome here. |
+| `research_budget_seconds` | `7.0` | Total wall-clock budget for the mini research agent (PLAN + SEARCH + READ + optional GAP). Also settable via `SMARTSPLIT_RESEARCH_BUDGET`. |
+| `research_enabled` | `true` | Kill switch for the mini research agent — set to `false` to skip the research pipeline entirely. Also settable via `SMARTSPLIT_RESEARCH_ENABLED`. |
 | `providers.*.model` | per-provider default | Override the default model |
 | `providers.*.temperature` | `0.3` | LLM temperature |
 | `providers.*.max_tokens` | `4096` | Max output tokens |
@@ -535,7 +547,10 @@ smartsplit/
   triage/
     detector.py             Request triage — TRANSPARENT or ENRICH (keywords + LLM)
     planner.py              Domain detection + prompt decomposition
-    enrichment.py           ENRICH path — workers search, analyze, compare
+    enrichment.py           ENRICH path — orchestrates research agent + analysis workers, injects structured sections into the brain prompt
+    enrichment_prompts.py   Domain-specialized templates for pre_analysis / multi_perspective (code, math, creative, writing, factual)
+    research.py             Mini research agent — PLAN → SEARCH → READ → GAP with time budget + graceful degradation
+    research_prompts.py     Prompts for the research agent (plan queries, synthesize findings, gap-fill)
     i18n_keywords.py        Multilingual keyword translations (generated)
   routing/
     router.py               Provider scoring + routing + quality gates
