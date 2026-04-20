@@ -32,19 +32,37 @@ class TestBuildEnrichmentSubtasks:
         result = _build_enrichment_subtasks("find python docs", ["web_search"])
         assert result == []
 
-    def test_pre_analysis_creates_reasoning_subtask(self):
-        result = _build_enrichment_subtasks("explain decorators", ["pre_analysis"])
+    def test_pre_analysis_code_prompt_uses_code_template_at_high_complexity(self):
+        # "refactor" + "function" → code domain → specialized code template
+        result = _build_enrichment_subtasks("Please refactor this function and explain", ["pre_analysis"])
         assert len(result) == 1
         assert result[0].type == TaskType.REASONING
-        assert result[0].complexity == Complexity.MEDIUM
-        assert "explain decorators" in result[0].content
+        assert result[0].complexity == Complexity.HIGH
+        assert "Invariants to preserve" in result[0].content
+        assert "refactor" in result[0].content
 
-    def test_multi_perspective_creates_reasoning_subtask(self):
-        result = _build_enrichment_subtasks("React vs Vue", ["multi_perspective"])
+    def test_pre_analysis_neutral_prompt_falls_back_to_medium_complexity(self):
+        # No strong domain keywords → generic fallback + MEDIUM
+        result = _build_enrichment_subtasks("Please help me", ["pre_analysis"])
         assert len(result) == 1
         assert result[0].type == TaskType.REASONING
         assert result[0].complexity == Complexity.MEDIUM
-        assert "React vs Vue" in result[0].content
+        assert "Key concepts" in result[0].content
+
+    def test_multi_perspective_code_prompt_uses_code_template_at_high_complexity(self):
+        # React vs Vue → code domain → specialized code template
+        result = _build_enrichment_subtasks("React vs Vue for a large-scale javascript frontend", ["multi_perspective"])
+        assert len(result) == 1
+        assert result[0].type == TaskType.REASONING
+        assert result[0].complexity == Complexity.HIGH
+        assert "**Claim**" in result[0].content
+        assert "**Evidence**" in result[0].content
+
+    def test_multi_perspective_neutral_prompt_falls_back_to_medium(self):
+        result = _build_enrichment_subtasks("Choose one", ["multi_perspective"])
+        assert len(result) == 1
+        assert result[0].complexity == Complexity.MEDIUM
+        assert "claim, evidence, cost or risk" in result[0].content
 
     def test_context_summary_creates_summarize_subtask_and_truncates(self):
         long_content = "x" * 500

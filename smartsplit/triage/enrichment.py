@@ -19,6 +19,11 @@ from smartsplit.models import (
     TaskType,
     TerminationState,
 )
+from smartsplit.triage.enrichment_prompts import (
+    resolve_multi_perspective_prompt,
+    resolve_pre_analysis_prompt,
+)
+from smartsplit.triage.planner import detect_domains
 from smartsplit.triage.research import (
     DEFAULT_RESEARCH_BUDGET,
     format_research_report,
@@ -81,21 +86,10 @@ async def _run_web_search_research(
     )
 
 
-_ENRICHMENT_PROMPTS: dict[str, str] = {
-    "pre_analysis": (
-        "Analyze this request and provide structured context that would help "
-        "another AI give a better response. Identify key concepts, constraints, "
-        "and relevant background information.\n\nRequest: {prompt}"
-    ),
-    "multi_perspective": (
-        "List the main options/alternatives and their key pros and cons "
-        "for this decision. Be factual and concise.\n\nQuestion: {prompt}"
-    ),
-    "context_summary": (
-        "Summarize this conversation history into key points, decisions made, "
-        "and current state. Be concise.\n\nConversation:\n{context}"
-    ),
-}
+_CONTEXT_SUMMARY_TEMPLATE = (
+    "Summarize this conversation history into key points, decisions made, "
+    "and current state. Be concise.\n\nConversation:\n{context}"
+)
 
 
 def _build_enrichment_subtasks(
@@ -105,32 +99,51 @@ def _build_enrichment_subtasks(
 ) -> list[Subtask]:
     """Build worker subtasks for each enrichment type.
 
-    Note: ``web_search`` is NOT handled here — it goes through the mini research
-    agent (``_run_web_search_research``) before this function is called.
+    ``pre_analysis`` and ``multi_perspective`` route through domain-aware
+    templates (``enrichment_prompts``). ``context_summary`` uses a simple
+    template. ``web_search`` is NOT handled here — it's intercepted upstream
+    and routed to the mini research agent.
+
+    When a domain-specific template is used (vs the generic fallback), the
+    subtask is marked ``Complexity.HIGH`` so the router picks a stronger
+    worker capable of structured output.
     """
     subtasks: list[Subtask] = []
-    for etype in enrichment_types:
-        template = _ENRICHMENT_PROMPTS.get(etype)
-        if not template:
-            continue
 
-        if etype == "context_summary":
+    # Compute domains once if any domain-aware enrichment is requested
+    domains: list[tuple[str, float]] = []
+    if any(t in ("pre_analysis", "multi_perspective") for t in enrichment_types):
+        domains = detect_domains(prompt)
+
+    for etype in enrichment_types:
+        if etype == "pre_analysis":
+            content, specialized = resolve_pre_analysis_prompt(prompt, domains)
+            subtasks.append(
+                Subtask(
+                    type=TaskType.REASONING,
+                    content=content,
+                    complexity=Complexity.HIGH if specialized else Complexity.MEDIUM,
+                )
+            )
+        elif etype == "multi_perspective":
+            content, specialized = resolve_multi_perspective_prompt(prompt, domains)
+            subtasks.append(
+                Subtask(
+                    type=TaskType.REASONING,
+                    content=content,
+                    complexity=Complexity.HIGH if specialized else Complexity.MEDIUM,
+                )
+            )
+        elif etype == "context_summary":
             context = "\n".join(f"[{m['role']}]: {m.get('content', '')[:200]}" for m in (messages or []))
             subtasks.append(
                 Subtask(
                     type=TaskType.SUMMARIZE,
-                    content=template.replace("{context}", context),
+                    content=_CONTEXT_SUMMARY_TEMPLATE.replace("{context}", context),
                     complexity=Complexity.LOW,
                 )
             )
-        else:
-            subtasks.append(
-                Subtask(
-                    type=TaskType.REASONING,
-                    content=template.replace("{prompt}", prompt),
-                    complexity=Complexity.MEDIUM,
-                )
-            )
+        # web_search is intercepted before reaching here; unknown types are silently dropped
     return subtasks
 
 
