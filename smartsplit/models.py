@@ -74,6 +74,15 @@ class Subtask(BaseModel):
         description="Original conversation messages. Set for single-subtask prompts to preserve context.",
         exclude=True,
     )
+    domain: str | None = Field(
+        default=None,
+        description=(
+            "Optional domain hint for routing (e.g. 'code', 'math', 'creative'). "
+            "When set, the router prefers competence_table[f'{type}.{domain}'][provider] "
+            "over the generic competence_table[type][provider] — picking the worker that "
+            "is strongest on this specific combination."
+        ),
+    )
 
 
 class TerminationState(StrEnum):

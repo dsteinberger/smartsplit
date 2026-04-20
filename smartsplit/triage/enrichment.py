@@ -114,6 +114,7 @@ def _build_enrichment_subtasks(
     domains: list[tuple[str, float]] = []
     if any(t in ("pre_analysis", "multi_perspective") for t in enrichment_types):
         domains = detect_domains(prompt)
+    top_domain = domains[0][0] if domains else None
 
     for etype in enrichment_types:
         if etype == "pre_analysis":
@@ -123,6 +124,7 @@ def _build_enrichment_subtasks(
                     type=TaskType.REASONING,
                     content=content,
                     complexity=Complexity.HIGH if specialized else Complexity.MEDIUM,
+                    domain=top_domain if specialized else None,
                 )
             )
         elif etype == "multi_perspective":
@@ -132,6 +134,7 @@ def _build_enrichment_subtasks(
                     type=TaskType.REASONING,
                     content=content,
                     complexity=Complexity.HIGH if specialized else Complexity.MEDIUM,
+                    domain=top_domain if specialized else None,
                 )
             )
         elif etype == "context_summary":

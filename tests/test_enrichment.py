@@ -64,6 +64,25 @@ class TestBuildEnrichmentSubtasks:
         assert result[0].complexity == Complexity.MEDIUM
         assert "claim, evidence, cost or risk" in result[0].content
 
+    def test_pre_analysis_carries_top_domain_on_specialized_template(self):
+        # "refactor" + "function" keywords → code domain top
+        result = _build_enrichment_subtasks("Please refactor this function and review edge cases", ["pre_analysis"])
+        assert len(result) == 1
+        assert result[0].domain == "code"
+
+    def test_pre_analysis_no_domain_on_fallback_template(self):
+        # No strong domain keywords → fallback template, no domain hint
+        result = _build_enrichment_subtasks("help me please with this", ["pre_analysis"])
+        assert len(result) == 1
+        assert result[0].domain is None
+
+    def test_multi_perspective_carries_top_domain(self):
+        result = _build_enrichment_subtasks(
+            "Compare React vs Vue javascript frameworks in detail", ["multi_perspective"]
+        )
+        assert len(result) == 1
+        assert result[0].domain == "code"
+
     def test_context_summary_creates_summarize_subtask_and_truncates(self):
         long_content = "x" * 500
         messages = [

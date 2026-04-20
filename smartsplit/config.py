@@ -357,6 +357,57 @@ DEFAULT_COMPETENCE_TABLE: dict[str, dict[str, int]] = {
         "openai:fast": 7,
         "openai:strong": 8,
     },
+    # ── Domain-specific reasoning scores ─────────────────────
+    # These rows override the generic "reasoning" score when the subtask
+    # carries a matching domain hint. Providers absent from a row fall
+    # back to the generic "reasoning" score, so rows can stay sparse.
+    "reasoning.code": {
+        "deepseek:strong": 10,  # deepseek-reasoner shines on code analysis
+        "deepseek:fast": 9,
+        "openrouter": 9,  # qwen3-coder free
+        "gemini": 9,
+        "anthropic:strong": 9,
+        "openai:strong": 9,
+        "mistral": 6,
+        "cerebras": 8,  # qwen: solid code reasoning
+        "groq": 7,
+    },
+    "reasoning.math": {
+        "deepseek:strong": 10,
+        "openai:strong": 10,
+        "gemini": 9,
+        "anthropic:strong": 8,
+        "cerebras": 7,
+        "mistral": 4,
+        "groq": 5,
+    },
+    "reasoning.creative": {
+        "anthropic:strong": 10,  # Claude: strongest creative reasoning
+        "anthropic:fast": 7,
+        "openai:strong": 8,
+        "mistral": 7,
+        "gemini": 7,
+        "cerebras": 6,
+        "groq": 5,
+    },
+    "reasoning.writing": {
+        "anthropic:strong": 10,
+        "anthropic:fast": 7,
+        "mistral": 7,
+        "openai:strong": 8,
+        "cerebras": 7,
+        "gemini": 8,
+        "groq": 6,
+    },
+    "reasoning.factual": {
+        "perplexity:strong": 9,  # grounded in web search
+        "perplexity:fast": 8,
+        "gemini": 9,
+        "anthropic:strong": 9,
+        "openai:strong": 8,
+        "cerebras": 7,
+        "mistral": 6,
+    },
 }
 
 # ── Env-var mapping ──────────────────────────────────────────

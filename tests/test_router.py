@@ -115,6 +115,81 @@ class TestScoring:
         assert score > 0
 
 
+# ── Domain-aware competence scoring ─────────────────────────
+
+
+class TestDomainAwareScoring:
+    """When a Subtask carries a domain hint, the router should prefer the
+    ``reasoning.<domain>`` competence row over the generic ``reasoning`` row."""
+
+    def _build_router(self, make_config, tmp_path, table):
+        config = make_config(["groq", "gemini"])
+        config.competence_table = table
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        return Router(registry, quota, config, bandit=None)
+
+    def test_domain_specific_row_wins_over_generic(self, make_config, tmp_path):
+        """reasoning.math score for gemini (9) > generic reasoning score (4) → domain row wins."""
+        table = {
+            "reasoning": {"groq": 9, "gemini": 4},
+            "reasoning.math": {"groq": 4, "gemini": 9},  # inverted for clarity
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(type=TaskType.REASONING, content="prove", complexity=Complexity.HIGH, domain="math")
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        # gemini should now win because its reasoning.math score (9) beats groq's (4)
+        assert score_gemini > score_groq
+
+    def test_without_domain_uses_generic_row(self, make_config, tmp_path):
+        """Same providers, no domain hint → generic row applies."""
+        table = {
+            "reasoning": {"groq": 9, "gemini": 4},
+            "reasoning.math": {"groq": 4, "gemini": 9},
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(type=TaskType.REASONING, content="prove", complexity=Complexity.HIGH)  # no domain
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        # groq should win because generic reasoning favors it (9 vs 4)
+        assert score_groq > score_gemini
+
+    def test_missing_domain_row_falls_back_to_generic(self, make_config, tmp_path):
+        """Domain hint present but no dedicated row → fallback to generic reasoning row."""
+        table = {
+            "reasoning": {"groq": 9, "gemini": 4},  # groq favored generically
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(
+            type=TaskType.REASONING,
+            content="x",
+            complexity=Complexity.HIGH,
+            domain="math",  # no reasoning.math row exists
+        )
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        # Falls back to generic → groq wins
+        assert score_groq > score_gemini
+
+    def test_partial_domain_row_falls_back_per_provider(self, make_config, tmp_path):
+        """reasoning.math exists but only defines gemini — groq falls back to generic row."""
+        table = {
+            "reasoning": {"groq": 8, "gemini": 6},
+            "reasoning.math": {"gemini": 10},  # only gemini listed
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(type=TaskType.REASONING, content="x", complexity=Complexity.HIGH, domain="math")
+        # gemini reads 10 from reasoning.math; groq reads 8 from reasoning (fallback).
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        assert score_gemini > score_groq
+
+
 # ── Routing ──────────────────────────────────────────────────
 
 

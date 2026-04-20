@@ -229,13 +229,35 @@ class Router:
     def _compute_quality(
         self, provider_name: str, subtask: Subtask, tier: str, pconfig: ProviderConfig | None
     ) -> float:
-        """Blend the static competence score with the MAB's learned score for this tier."""
-        competence = self._config.competence_table.get(
-            subtask.type.value,
-            self._config.competence_table.get("general", {}),
-        )
+        """Blend the static competence score with the MAB's learned score for this tier.
+
+        Lookup order for the static score:
+          1. ``competence_table[f"{type}.{domain}"][provider]`` when ``subtask.domain`` is set
+          2. ``competence_table[type][provider]`` (generic task-type score)
+          3. ``competence_table["general"][provider]`` (cross-task fallback)
+
+        The bandit key stays on ``type`` (no ``.domain`` suffix) so learning
+        converges faster — the domain-specific prior already biases the score.
+        """
         tiered_key = f"{provider_name}:{tier}"
-        static_quality = competence.get(tiered_key, competence.get(provider_name, _DEFAULT_COMPETENCE_SCORE)) / 10.0
+
+        def _lookup(table_key: str) -> int | None:
+            row = self._config.competence_table.get(table_key)
+            if not row:
+                return None
+            return row.get(tiered_key, row.get(provider_name))
+
+        static_score: int | None = None
+        if subtask.domain:
+            static_score = _lookup(f"{subtask.type.value}.{subtask.domain}")
+        if static_score is None:
+            static_score = _lookup(subtask.type.value)
+        if static_score is None:
+            static_score = _lookup("general")
+        if static_score is None:
+            static_score = _DEFAULT_COMPETENCE_SCORE
+
+        static_quality = static_score / 10.0
         bandit_key = tiered_key if pconfig and pconfig.type == ProviderType.PAID else provider_name
         if self._bandit:
             return self._bandit.score(subtask.type.value, bandit_key, prior=static_quality)
