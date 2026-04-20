@@ -375,6 +375,36 @@ class TestDetectorEnrich:
             assert len(types) >= 2, f"Expected 2+ enrichment types, got {types}"
 
 
+class TestDetectorProxyMode:
+    """proxy_mode=True skips context_summary since the brain already has full history."""
+
+    def test_proxy_mode_skips_context_summary_on_message_count(self):
+        messages = [{"role": "user", "content": f"Message {i} content"} for i in range(15)]
+        # Default (non-proxy): triggers context_summary
+        _, default_types = detect("Continue", messages)
+        assert "context_summary" in default_types
+        # Proxy mode: context_summary skipped
+        decision, proxy_types = detect("Continue", messages, proxy_mode=True)
+        assert "context_summary" not in proxy_types
+        assert decision == TriageDecision.TRANSPARENT
+
+    def test_proxy_mode_skips_context_summary_on_char_count(self):
+        messages = [{"role": "user", "content": "x" * 1000} for _ in range(6)]
+        _, default_types = detect("What next?", messages)
+        assert "context_summary" in default_types
+        decision, proxy_types = detect("What next?", messages, proxy_mode=True)
+        assert "context_summary" not in proxy_types
+        assert decision == TriageDecision.TRANSPARENT
+
+    def test_proxy_mode_still_detects_web_search(self):
+        # Long history + web_search keyword → web_search still fires in proxy mode
+        messages = [{"role": "user", "content": "x" * 1000} for _ in range(6)]
+        decision, types = detect("latest AI news 2026", messages, proxy_mode=True)
+        assert "web_search" in types
+        assert "context_summary" not in types
+        assert decision == TriageDecision.ENRICH
+
+
 # ── App tests ──────────────────────────────────────────────────
 
 

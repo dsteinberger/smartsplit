@@ -302,7 +302,7 @@ def _filter_useful_enrichments(
     if not ctx.enabled:
         return TriageDecision.TRANSPARENT, []
 
-    decision, enrichment_types = detect(triage_prompt, flat_messages)
+    decision, enrichment_types = detect(triage_prompt, flat_messages, proxy_mode=True)
     enrichment_types = [e for e in enrichment_types if e in _PROXY_USEFUL_ENRICHMENTS]
 
     # Drop web_search if we have neither a search provider nor a client-side search tool.

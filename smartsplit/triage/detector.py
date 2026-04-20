@@ -87,11 +87,18 @@ def _has_tool_messages(messages: list[dict[str, str]]) -> bool:
 def detect(
     prompt: str,
     messages: list[dict[str, str]] | None = None,
+    *,
+    proxy_mode: bool = False,
 ) -> tuple[TriageDecision, list[str]]:
     """Fast heuristic detector — decides TRANSPARENT or ENRICH without LLM calls.
 
     Returns (decision, enrichment_types) where enrichment_types is a list of
     enrichment categories to run (e.g. ["web_search", "pre_analysis"]).
+
+    When ``proxy_mode`` is True, ``context_summary`` detection is skipped — the
+    brain already has the full conversation history in proxy mode, so
+    summarising it would be redundant (and the proxy pipeline filters it out
+    anyway via ``_PROXY_USEFUL_ENRICHMENTS``).
     """
     if not prompt:
         return TriageDecision.TRANSPARENT, []
@@ -105,11 +112,12 @@ def detect(
 
     # ── Early checks (before length filter) ──────────────────
 
-    # Long conversation history → context summary to save brain tokens
+    # Long conversation history → context summary to save brain tokens.
+    # Skipped in proxy mode where the brain already has the full history.
     # Only count user/assistant messages — system messages often contain large
     # injected files (IDE context) which don't indicate a long conversation.
     # Strip XML-tagged metadata from char count (agents inject large blocks).
-    if msgs:
+    if msgs and not proxy_mode:
         from smartsplit.proxy.formats import strip_agent_metadata
 
         conversation_msgs = [m for m in msgs if m.get("role") in ("user", "assistant")]
