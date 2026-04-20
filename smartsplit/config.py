@@ -8,6 +8,7 @@ Supports three config sources (lowest → highest priority):
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -54,6 +55,14 @@ class SmartSplitConfig(BaseModel):
     overrides: dict[str, str] = Field(
         default_factory=dict,
         description="Force a specific provider for a task type. Example: {'code': 'anthropic'}",
+    )
+    research_budget_seconds: float = Field(
+        default=7.0,
+        description="Total time budget (seconds) for the mini research agent pipeline.",
+    )
+    research_enabled: bool = Field(
+        default=True,
+        description="Kill switch for the mini research agent — set False to fall back to one-shot web_search.",
     )
 
 
@@ -406,6 +415,15 @@ def load_config() -> SmartSplitConfig:
     brain_env = os.environ.get("SMARTSPLIT_BRAIN")
     if brain_env:
         raw["brain"] = brain_env
+
+    research_budget_env = os.environ.get("SMARTSPLIT_RESEARCH_BUDGET")
+    if research_budget_env:
+        with contextlib.suppress(ValueError):
+            raw["research_budget_seconds"] = float(research_budget_env)
+
+    research_enabled_env = os.environ.get("SMARTSPLIT_RESEARCH_ENABLED")
+    if research_enabled_env is not None:
+        raw["research_enabled"] = research_enabled_env.lower() not in ("0", "false", "no", "off")
 
     for env_var, provider_name in _ENV_KEY_MAP.items():
         api_key = os.environ.get(env_var)

@@ -26,12 +26,11 @@ from smartsplit.triage.enrichment import (
 
 
 class TestBuildEnrichmentSubtasks:
-    def test_web_search_creates_web_search_subtask(self):
+    def test_web_search_is_not_handled_here(self):
+        """web_search is intercepted upstream and routed to the mini research agent —
+        _build_enrichment_subtasks must ignore it."""
         result = _build_enrichment_subtasks("find python docs", ["web_search"])
-        assert len(result) == 1
-        assert result[0].type == TaskType.WEB_SEARCH
-        assert result[0].complexity == Complexity.LOW
-        assert result[0].content == "find python docs"
+        assert result == []
 
     def test_pre_analysis_creates_reasoning_subtask(self):
         result = _build_enrichment_subtasks("explain decorators", ["pre_analysis"])
@@ -70,10 +69,11 @@ class TestBuildEnrichmentSubtasks:
         assert result == []
 
     def test_multiple_enrichment_types_create_multiple_subtasks(self):
+        # web_search is filtered out (handled by research pipeline instead)
         result = _build_enrichment_subtasks("query", ["web_search", "pre_analysis", "multi_perspective"])
-        assert len(result) == 3
+        assert len(result) == 2
         types = [s.type for s in result]
-        assert types == [TaskType.WEB_SEARCH, TaskType.REASONING, TaskType.REASONING]
+        assert types == [TaskType.REASONING, TaskType.REASONING]
 
 
 # ── build_enriched_messages ────────────────────────────────────
@@ -184,8 +184,17 @@ def _make_ctx(
 class TestEnrichAndForward:
     @pytest.mark.asyncio
     async def test_happy_path(self):
-        ctx = _make_ctx(brain_return=("final answer", TokenUsage()))
-        content, results = await enrich_and_forward(ctx, "search python docs", ["web_search"])
+        # Use pre_analysis (non-research path) to exercise the router.route branch
+        ctx = _make_ctx(
+            brain_return=("final answer", TokenUsage()),
+            route_return=RouteResult(
+                type=TaskType.REASONING,
+                response="pre-analysis result",
+                provider="groq",
+                termination=TerminationState.COMPLETED,
+            ),
+        )
+        content, results = await enrich_and_forward(ctx, "explain decorators please", ["pre_analysis"])
         assert content == "final answer"
         # results = worker results + brain result
         assert len(results) == 2
@@ -200,9 +209,15 @@ class TestEnrichAndForward:
             brain_side_effect=[
                 RuntimeError("enriched failed"),
                 ("fallback answer", TokenUsage()),
-            ]
+            ],
+            route_return=RouteResult(
+                type=TaskType.REASONING,
+                response="analysis",
+                provider="groq",
+                termination=TerminationState.COMPLETED,
+            ),
         )
-        content, results = await enrich_and_forward(ctx, "search python docs", ["web_search"])
+        content, results = await enrich_and_forward(ctx, "analyze this code please", ["pre_analysis"])
         assert content == "fallback answer"
         assert ctx.registry.call_brain.call_count == 2
         # Brain result should be ESCALATED
@@ -214,11 +229,167 @@ class TestEnrichAndForward:
             brain_side_effect=[
                 RuntimeError("first fail"),
                 RuntimeError("second fail"),
-            ]
+            ],
+            route_return=RouteResult(
+                type=TaskType.REASONING,
+                response="analysis",
+                provider="groq",
+                termination=TerminationState.COMPLETED,
+            ),
         )
-        content, results = await enrich_and_forward(ctx, "search python docs", ["web_search"])
+        content, results = await enrich_and_forward(ctx, "analyze this please", ["pre_analysis"])
         assert content is None
         assert results == []
+
+
+# ── web_search → mini research agent integration ──────────────
+
+
+class TestEnrichAndForwardWebSearch:
+    """Tests for the web_search → run_research integration in enrich_and_forward/enrich_only."""
+
+    @pytest.mark.asyncio
+    async def test_web_search_routes_to_research_pipeline(self):
+        """web_search enrichment calls run_research instead of router.route."""
+        from smartsplit.models import ResearchFinding, ResearchReport
+        from smartsplit.triage.enrichment import enrich_only
+
+        report = ResearchReport(
+            findings=[ResearchFinding(fact="F1", source_url="https://a", confidence="high")],
+            gaps=[],
+            queries_used=["q1"],
+        )
+
+        ctx = _make_ctx()
+        with patch("smartsplit.triage.enrichment.run_research", AsyncMock(return_value=report)):
+            results = await enrich_only(ctx, "find LLM routers", ["web_search"])
+
+        assert len(results) == 1
+        assert results[0].type == TaskType.WEB_SEARCH
+        assert results[0].provider == "smartsplit.research"
+        # Formatted report contains the sourced fact
+        assert "FACT (high): F1" in results[0].response
+        assert "https://a" in results[0].response
+
+    @pytest.mark.asyncio
+    async def test_web_search_degraded_returns_raw_snippets(self):
+        """When research degrades to a raw-snippet string, it's still wrapped as a RouteResult."""
+        from smartsplit.triage.enrichment import enrich_only
+
+        ctx = _make_ctx()
+        with patch(
+            "smartsplit.triage.enrichment.run_research",
+            AsyncMock(return_value="raw snippet content"),
+        ):
+            results = await enrich_only(ctx, "find something", ["web_search"])
+
+        assert len(results) == 1
+        assert results[0].response == "raw snippet content"
+
+    @pytest.mark.asyncio
+    async def test_web_search_empty_returns_no_result(self):
+        """When research produces nothing usable (empty string), no RouteResult is emitted."""
+        from smartsplit.triage.enrichment import enrich_only
+
+        ctx = _make_ctx()
+        with patch("smartsplit.triage.enrichment.run_research", AsyncMock(return_value="")):
+            results = await enrich_only(ctx, "find something", ["web_search"])
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_web_search_and_pre_analysis_cohabit(self):
+        """web_search goes through research, pre_analysis through router.route — both emit results."""
+        from smartsplit.models import ResearchFinding, ResearchReport
+        from smartsplit.triage.enrichment import enrich_only
+
+        report = ResearchReport(
+            findings=[ResearchFinding(fact="F", source_url="https://u", confidence="medium")],
+            gaps=[],
+            queries_used=["q"],
+        )
+
+        ctx = _make_ctx(
+            route_return=RouteResult(
+                type=TaskType.REASONING,
+                response="analysis output",
+                provider="groq",
+                termination=TerminationState.COMPLETED,
+            ),
+        )
+        with patch("smartsplit.triage.enrichment.run_research", AsyncMock(return_value=report)):
+            results = await enrich_only(
+                ctx,
+                "compare foo and bar in depth please",
+                ["web_search", "pre_analysis"],
+            )
+
+        types = [r.type for r in results]
+        assert TaskType.WEB_SEARCH in types
+        assert TaskType.REASONING in types
+        assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_research_disabled_via_config_skips_web_search(self):
+        """When cfg.research_enabled is False, web_search enrichment is skipped entirely."""
+        from smartsplit.config import SmartSplitConfig
+        from smartsplit.triage.enrichment import enrich_only
+
+        ctx = _make_ctx()
+        ctx.config = SmartSplitConfig(research_enabled=False)
+        research_mock = AsyncMock(return_value="would be used")
+        with patch("smartsplit.triage.enrichment.run_research", research_mock):
+            results = await enrich_only(ctx, "find things", ["web_search"])
+
+        assert results == []
+        research_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_research_budget_from_config_passed_to_run_research(self):
+        """cfg.research_budget_seconds is forwarded as run_research's total_budget."""
+        from smartsplit.config import SmartSplitConfig
+        from smartsplit.triage.enrichment import enrich_only
+
+        ctx = _make_ctx()
+        ctx.config = SmartSplitConfig(research_budget_seconds=3.5)
+
+        captured = {}
+
+        async def fake(ctx_, prompt, messages, **kwargs):
+            captured.update(kwargs)
+            return ""
+
+        with patch("smartsplit.triage.enrichment.run_research", side_effect=fake):
+            await enrich_only(ctx, "find things", ["web_search"])
+
+        assert captured.get("total_budget") == 3.5
+
+    @pytest.mark.asyncio
+    async def test_research_crash_doesnt_break_enrichment(self):
+        """If run_research raises, we log and continue with other enrichments."""
+        from smartsplit.triage.enrichment import enrich_only
+
+        ctx = _make_ctx(
+            route_return=RouteResult(
+                type=TaskType.REASONING,
+                response="analysis",
+                provider="groq",
+                termination=TerminationState.COMPLETED,
+            ),
+        )
+        with patch(
+            "smartsplit.triage.enrichment.run_research",
+            AsyncMock(side_effect=RuntimeError("pipeline exploded")),
+        ):
+            results = await enrich_only(
+                ctx,
+                "compare foo and bar in detail",
+                ["web_search", "pre_analysis"],
+            )
+
+        # Research crashed → no web_search result, but pre_analysis still ran
+        assert len(results) == 1
+        assert results[0].type == TaskType.REASONING
 
 
 # ── anthropic_has_tool_named ──────────────────────────────────
@@ -445,30 +616,42 @@ class TestEnrichmentBackoff:
         assert "Python 3.13 info here" in str(last_user["content"])
 
 
-class TestExtractSearchQuery:
-    """Covers _extract_search_query, in particular the ctx.last_search_query store path."""
+class TestResearchQueryStoredOnCtx:
+    """Regression: enrich_only must expose the planned search query on ctx.last_search_query
+    so the FAKE tool_use fallback (proxy mode) can still surface a reasonable query when
+    Serper is down."""
 
     @pytest.mark.asyncio
-    async def test_store_on_ctx_writes_refined_query(self):
-        """When store_on_ctx=True and the worker LLM returns a JSON array, the refined query lands on ctx."""
-        from smartsplit.triage.enrichment import _extract_search_query
+    async def test_store_query_on_ctx_forwarded_to_run_research(self):
+        from smartsplit.triage.enrichment import enrich_only
 
-        ctx = MagicMock()
-        ctx.last_search_query = ""
-        ctx.registry = MagicMock()
-        ctx.registry.call_worker_llm = AsyncMock(return_value='["python 3.13 release notes"]')
+        ctx = _make_ctx()
 
-        refined = await _extract_search_query(ctx, "What's new in Python 3.13?", None, store_on_ctx=True)
-        assert refined == "python 3.13 release notes"
-        assert ctx.last_search_query == "python 3.13 release notes"
+        captured_kwargs = {}
+
+        async def fake_research(ctx_, prompt, messages, **kwargs):
+            captured_kwargs.update(kwargs)
+            return ""
+
+        with patch("smartsplit.triage.enrichment.run_research", side_effect=fake_research):
+            await enrich_only(ctx, "find things", ["web_search"])
+
+        assert captured_kwargs.get("store_query_on_ctx") is True
 
     @pytest.mark.asyncio
-    async def test_llm_failure_returns_raw_prompt(self):
-        from smartsplit.triage.enrichment import _extract_search_query
+    async def test_enrich_and_forward_does_not_store_query_on_ctx(self):
+        """API mode (enrich_and_forward) does not need the FAKE fallback query stored."""
+        from smartsplit.triage.enrichment import enrich_and_forward
 
-        ctx = MagicMock()
-        ctx.registry = MagicMock()
-        ctx.registry.call_worker_llm = AsyncMock(side_effect=RuntimeError("llm down"))
+        ctx = _make_ctx(brain_return=("ok", TokenUsage()))
 
-        refined = await _extract_search_query(ctx, "raw prompt", None)
-        assert refined == "raw prompt"
+        captured_kwargs = {}
+
+        async def fake_research(ctx_, prompt, messages, **kwargs):
+            captured_kwargs.update(kwargs)
+            return ""
+
+        with patch("smartsplit.triage.enrichment.run_research", side_effect=fake_research):
+            await enrich_and_forward(ctx, "find things", ["web_search"])
+
+        assert captured_kwargs.get("store_query_on_ctx") is False

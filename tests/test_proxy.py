@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,11 +27,11 @@ from smartsplit.proxy.pipeline import create_app
 from smartsplit.tools.anticipation import (
     extract_actual_tool_calls,
     extract_already_read_paths,
+    extract_project_context,
     extract_recently_written_paths,
     inject_anticipated_context,
 )
 from smartsplit.triage.detector import TriageDecision, detect
-from smartsplit.triage.enrichment import extract_project_context
 
 # ── Format tests ───────────────────────────────────────────────
 
@@ -1031,3 +1032,124 @@ class TestAnthropicFormatHelpers:
         # Tool result converted
         assert messages[2]["role"] == "tool"
         assert messages[2]["content"] == "def login(): pass"
+
+
+# ── End-to-end: research-based enrichment injection ──────────
+
+
+class TestResearchInjectionEndToEnd:
+    """End-to-end validation that the mini research agent's structured output lands
+    in the brain prompt as a sourced-findings block, not a raw snippets blob."""
+
+    @pytest.mark.asyncio
+    async def test_research_report_injected_as_structured_findings(self, monkeypatch):
+        from smartsplit.models import (
+            Mode,
+            ResearchFinding,
+            ResearchReport,
+            TaskType,
+            TokenUsage,
+        )
+        from smartsplit.triage import enrichment
+
+        # Fake research output — what run_research would return on the happy path
+        report = ResearchReport(
+            findings=[
+                ResearchFinding(
+                    fact="FastAPI supports async natively",
+                    source_url="https://fastapi.tiangolo.com/async",
+                    confidence="high",
+                ),
+                ResearchFinding(
+                    fact="Flask 3.0 adds native async views",
+                    source_url="https://flask.palletsprojects.com/changelog",
+                    confidence="medium",
+                ),
+            ],
+            gaps=["no throughput benchmarks published"],
+            queries_used=["fastapi flask async 2025", "flask 3 async support"],
+        )
+
+        monkeypatch.setattr(
+            enrichment,
+            "run_research",
+            AsyncMock(return_value=report),
+        )
+
+        # Build a minimal ctx
+        ctx = MagicMock()
+        ctx.registry.brain_name = "groq"
+        ctx.registry.call_brain = AsyncMock(return_value=("final answer", TokenUsage()))
+        ctx.mode = Mode.BALANCED
+        # router.route shouldn't be called for web_search-only enrichment, but must exist
+        ctx.router.route = AsyncMock()
+
+        original_messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Should I pick FastAPI or Flask for an async API?"},
+        ]
+
+        content, results = await enrichment.enrich_and_forward(
+            ctx,
+            "Should I pick FastAPI or Flask for an async API?",
+            ["web_search"],
+            messages=original_messages,
+        )
+
+        assert content == "final answer"
+
+        # The brain was called with enriched messages — inspect them
+        call_kwargs = ctx.registry.call_brain.call_args.kwargs
+        enriched = call_kwargs["messages"]
+        last_user = enriched[-1]
+        assert last_user["role"] == "user"
+
+        injected = last_user["content"]
+        # Structured findings block present
+        assert "[Research findings" in injected
+        # Each fact cited with its URL + confidence
+        assert "FACT (high): FastAPI supports async natively" in injected
+        assert "https://fastapi.tiangolo.com/async" in injected
+        assert "FACT (medium): Flask 3.0 adds native async views" in injected
+        # Gaps surfaced
+        assert "no throughput benchmarks published" in injected
+        # Queries used are surfaced for observability
+        assert "fastapi flask async 2025" in injected
+
+        # worker RouteResult + brain result both returned
+        assert len(results) == 2
+        assert results[0].type == TaskType.WEB_SEARCH
+        assert results[0].provider == "smartsplit.research"
+        assert results[-1].provider == "groq"
+
+    @pytest.mark.asyncio
+    async def test_research_degraded_falls_back_to_raw_snippets_in_injection(self, monkeypatch):
+        """When research degrades (returns a raw snippets string), the snippets still reach the brain."""
+        from smartsplit.models import Mode, TokenUsage
+        from smartsplit.triage import enrichment
+
+        raw_snippets = "**Result 1**\nSome snippet text\nhttps://example.com/a"
+
+        monkeypatch.setattr(
+            enrichment,
+            "run_research",
+            AsyncMock(return_value=raw_snippets),
+        )
+
+        ctx = MagicMock()
+        ctx.registry.brain_name = "groq"
+        ctx.registry.call_brain = AsyncMock(return_value=("ok", TokenUsage()))
+        ctx.mode = Mode.BALANCED
+        ctx.router.route = AsyncMock()
+
+        await enrichment.enrich_and_forward(
+            ctx,
+            "some prompt",
+            ["web_search"],
+            messages=[{"role": "user", "content": "some prompt"}],
+        )
+
+        enriched = ctx.registry.call_brain.call_args.kwargs["messages"]
+        injected = enriched[-1]["content"]
+        assert "Some snippet text" in injected
+        assert "example.com" in injected

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -138,6 +139,26 @@ class RoutingStep(BaseModel):
     termination: TerminationState = TerminationState.COMPLETED
     escalations: list[EscalationRecord] = Field(default_factory=list)
     estimated_tokens: int = 0
+
+
+class ResearchFinding(BaseModel):
+    """A single sourced fact extracted from web search results."""
+
+    model_config = ConfigDict(frozen=True)
+
+    fact: str
+    source_url: str
+    confidence: Literal["high", "medium", "low"] = "medium"
+
+
+class ResearchReport(BaseModel):
+    """Structured output of the mini research agent — sourced findings plus gaps."""
+
+    model_config = ConfigDict(frozen=True)
+
+    findings: list[ResearchFinding] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    queries_used: list[str] = Field(default_factory=list)
 
 
 class RequestLog(BaseModel):
