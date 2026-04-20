@@ -467,12 +467,12 @@ async def run_research(
 
 
 def format_research_report(report: ResearchReport) -> str:
-    """Render a ResearchReport as a readable, structured block for injection into the brain prompt.
+    """Render a ResearchReport as discrete sourced facts for injection into the brain prompt.
 
-    The format favours discrete sourced facts over paragraph prose so the brain
-    can cite or ignore each finding independently.
+    The wrapping label ("Research findings") is added by the injection layer
+    (``build_enriched_messages``) so all enrichment types share the same framing.
     """
-    lines = ["[Research findings — use as evidence, cite sources when relevant]"]
+    lines: list[str] = []
     for f in report.findings:
         lines.append(f"- FACT ({f.confidence}): {f.fact} [source: {f.source_url}]")
     if report.gaps:

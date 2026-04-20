@@ -147,6 +147,17 @@ def _build_enrichment_subtasks(
     return subtasks
 
 
+_LABEL_BY_TASK_TYPE: dict[TaskType, str] = {
+    TaskType.WEB_SEARCH: "Research findings",
+    TaskType.REASONING: "Analysis",
+    TaskType.SUMMARIZE: "Conversation summary",
+}
+
+
+def _label_for(task_type: TaskType) -> str:
+    return _LABEL_BY_TASK_TYPE.get(task_type, task_type.value.replace("_", " ").title())
+
+
 def build_enriched_messages(
     original_messages: list[dict[str, str]],
     prompt: str,
@@ -155,27 +166,34 @@ def build_enriched_messages(
     """Build the enriched message list: original messages + worker context injected.
 
     The original conversation is kept intact. Worker results are injected as
-    additional context in the last user message. The brain sees:
+    additional context in the last user message using a unified structured
+    format — each result is its own section delimited by ``---`` separators,
+    with a bold label derived from its TaskType. The worker's own markdown
+    (e.g. ``## Invariants to preserve``) is preserved verbatim so the brain
+    can read sub-sections.
+
+    The brain sees:
     - All system prompts unchanged
     - All conversation history unchanged
-    - Last user message = original prompt + worker context block
+    - Last user message = original prompt + enrichment block
     """
     if not worker_results:
         return original_messages
 
-    # Build the context block from worker results
-    context_parts = []
+    sections: list[str] = []
     for r in worker_results:
         if r.response and r.termination == TerminationState.COMPLETED:
-            label = r.type.value.replace("_", " ").title()
-            context_parts.append(f"- {label}: {r.response}")
+            sections.append(f"---\n**{_label_for(r.type)}**\n\n{r.response}")
 
-    if not context_parts:
+    if not sections:
         return original_messages
 
     context_block = (
         "\n\n[Additional context gathered by SmartSplit — use if relevant, ignore if not. "
-        "IMPORTANT: Always respond in the same language as the user's message above.]\n" + "\n".join(context_parts)
+        "Cite sources when they are provided.\n"
+        "IMPORTANT: Always respond in the same language as the user's message above.]\n\n"
+        + "\n\n".join(sections)
+        + "\n---"
     )
 
     # Inject into the last user message (deep copy to protect originals for fallback).

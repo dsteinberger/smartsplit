@@ -1105,8 +1105,8 @@ class TestResearchInjectionEndToEnd:
         assert last_user["role"] == "user"
 
         injected = last_user["content"]
-        # Structured findings block present
-        assert "[Research findings" in injected
+        # Unified structured injection format — section labelled "Research findings"
+        assert "**Research findings**" in injected
         # Each fact cited with its URL + confidence
         assert "FACT (high): FastAPI supports async natively" in injected
         assert "https://fastapi.tiangolo.com/async" in injected

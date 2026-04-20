@@ -119,10 +119,35 @@ class TestBuildEnrichedMessages:
         results = [self._make_result("web info")]
         enriched = build_enriched_messages(messages, "my question", results)
         assert len(enriched) == 2
-        assert "[Additional context gathered by SmartSplit" in enriched[1]["content"]
-        assert "Web Search: web info" in enriched[1]["content"]
+        injected = enriched[1]["content"]
+        assert "[Additional context gathered by SmartSplit" in injected
+        # New unified format: bold section label + separators, worker content preserved
+        assert "**Research findings**" in injected
+        assert "web info" in injected
+        assert "---" in injected
         # Original prompt still present
-        assert enriched[1]["content"].startswith("my question")
+        assert injected.startswith("my question")
+
+    def test_reasoning_result_uses_analysis_label(self):
+        messages = [{"role": "user", "content": "hi"}]
+        results = [self._make_result("## Invariants\n- X", task_type=TaskType.REASONING)]
+        enriched = build_enriched_messages(messages, "hi", results)
+        assert "**Analysis**" in enriched[0]["content"]
+        # Worker markdown headings are preserved, not flattened to a bullet
+        assert "## Invariants" in enriched[0]["content"]
+
+    def test_multiple_results_each_get_own_section(self):
+        messages = [{"role": "user", "content": "hi"}]
+        results = [
+            self._make_result("findings content", task_type=TaskType.WEB_SEARCH),
+            self._make_result("## Positions\n- A", task_type=TaskType.REASONING),
+        ]
+        enriched = build_enriched_messages(messages, "hi", results)
+        injected = enriched[0]["content"]
+        # Two labelled sections
+        assert injected.count("---") >= 3  # opening + between + closing
+        assert "**Research findings**" in injected
+        assert "**Analysis**" in injected
 
     def test_returns_original_when_no_results(self):
         messages = [{"role": "user", "content": "hello"}]
