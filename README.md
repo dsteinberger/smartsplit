@@ -1,3 +1,9 @@
+# ⚠️ Work in progress — not usable yet
+
+**This repository is under active development. It is not finished and not ready for use.** APIs, behavior, and structure change without notice. Expect breakage. Do not rely on it for anything yet.
+
+---
+
 <div align="center">
 
 <img src="assets/banner.png" alt="SmartSplit — Why use one LLM when you can use them all?" width="100%">
