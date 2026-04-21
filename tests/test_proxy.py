@@ -1211,4 +1211,4 @@ class TestResearchInjectionEndToEnd:
         enriched = ctx.registry.call_brain.call_args.kwargs["messages"]
         injected = enriched[-1]["content"]
         assert "Some snippet text" in injected
-        assert "example.com" in injected
+        assert "https://example.com/a" in injected
