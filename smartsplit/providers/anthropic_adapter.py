@@ -47,14 +47,20 @@ def openai_to_anthropic(body: dict, model: str) -> dict:
                     blocks.append({"type": "text", "text": content})
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
+                    args_raw = fn.get("arguments", {})
+                    if isinstance(args_raw, str):
+                        try:
+                            tool_input = json.loads(args_raw)
+                        except (json.JSONDecodeError, ValueError):
+                            tool_input = {}
+                    else:
+                        tool_input = args_raw or {}
                     blocks.append(
                         {
                             "type": "tool_use",
                             "id": tc.get("id", ""),
                             "name": fn.get("name", ""),
-                            "input": json.loads(fn["arguments"])
-                            if isinstance(fn.get("arguments"), str)
-                            else fn.get("arguments", {}),
+                            "input": tool_input,
                         }
                     )
                 api_msg["content"] = blocks

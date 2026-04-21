@@ -11,7 +11,7 @@ from smartsplit.providers.anthropic_adapter import (
     anthropic_to_openai,
     openai_to_anthropic,
 )
-from smartsplit.providers.base import _EMPTY_USAGE, LLMProvider, _http_error_message
+from smartsplit.providers.base import _EMPTY_USAGE, LLMProvider, http_error_to_provider_error
 
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
@@ -57,7 +57,7 @@ class AnthropicProvider(LLMProvider):
             response = await self.http.post(_ANTHROPIC_URL, headers=self._headers(), json=body)
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, _http_error_message(e)) from e
+            raise http_error_to_provider_error(self.name, e) from e
         except httpx.TimeoutException as e:
             raise ProviderError(self.name, "Request timed out") from e
         try:
@@ -84,7 +84,7 @@ class AnthropicProvider(LLMProvider):
             response = await self.http.post(_ANTHROPIC_URL, headers=self._headers(), json=anthropic_body)
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, _http_error_message(e)) from e
+            raise http_error_to_provider_error(self.name, e) from e
         except httpx.TimeoutException as e:
             raise ProviderError(self.name, "Request timed out") from e
         try:

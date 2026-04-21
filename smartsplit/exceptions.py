@@ -15,6 +15,27 @@ class ProviderError(SmartSplitError):
         super().__init__(f"[{provider}] {message}")
 
 
+class ProviderAuthError(ProviderError):
+    """Provider rejected the API key (HTTP 401/403).
+
+    Signals a configuration problem — retrying does not help. The registry
+    trips the circuit breaker immediately on this error.
+    """
+
+
+class ProviderRateLimitError(ProviderError):
+    """Provider rate limit exceeded (HTTP 429).
+
+    Carries the ``retry_after`` hint from the response (if any) so callers
+    can skip the provider for a bounded time instead of tripping the
+    breaker: a 429 means "slow down", not "I am down".
+    """
+
+    def __init__(self, provider: str, message: str, retry_after: float | None = None) -> None:
+        super().__init__(provider, message)
+        self.retry_after = retry_after
+
+
 class NoProviderAvailableError(SmartSplitError):
     """No provider could handle the request."""
 

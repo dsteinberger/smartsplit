@@ -221,6 +221,31 @@ class TestProcessAnthropicRequestLite:
         action = await process_anthropic_request_lite(ctx, body, {})
         assert action["type"] == "passthrough"
 
+    @pytest.mark.asyncio
+    async def test_internal_agent_call_skips_pipeline(self):
+        """Agent-internal calls (auto-compact, title gen, …) short-circuit to passthrough
+        without firing any SmartSplit LLM call, even if detector and pattern_learner are wired."""
+        detector = MagicMock()
+        detector.predict = AsyncMock()
+        pattern_learner = MagicMock()
+        pattern_learner.observe_outcome = MagicMock()
+
+        ctx = _make_ctx(detector=detector, pattern_learner=pattern_learner)
+        ctx.registry.call_worker_llm = AsyncMock()
+
+        body = {
+            "system": "Summarize the conversation below.",
+            "max_tokens": 200,
+            "messages": [{"role": "user", "content": "..."}],
+            "tools": [{"name": "Read"}],  # tools may be present even on internal calls
+        }
+        action = await process_anthropic_request_lite(ctx, body, {})
+
+        assert action["type"] == "passthrough"
+        detector.predict.assert_not_awaited()
+        pattern_learner.observe_outcome.assert_not_called()
+        ctx.registry.call_worker_llm.assert_not_awaited()
+
 
 # ── process_anthropic_request ────────────────────────────────
 

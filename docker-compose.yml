@@ -1,8 +1,30 @@
 services:
-  # API mode — OpenAI-compatible endpoint (default)
+  # Default — unified (API + HTTPS proxy in one process)
   smartsplit:
     build: .
     image: smartsplit:latest
+    command: ["--host", "0.0.0.0"]
+    ports:
+      - "8420:8420"  # API
+      - "8421:8421"  # proxy
+    env_file: .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ~/.smartsplit/certs:/certs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # API only — OpenAI-compatible endpoint
+  # Usage: docker compose --profile api up -d api
+  api:
+    build: .
+    image: smartsplit:latest
+    command: ["--api-only", "--host", "0.0.0.0", "--port", "8420"]
     ports:
       - "8420:8420"
     env_file: .env
@@ -10,18 +32,19 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8420/health').raise_for_status()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
+    profiles:
+      - api
 
-  # Proxy mode — HTTPS proxy for Claude Code / any agent
-  # Usage: docker compose up proxy
+  # Proxy only — HTTPS proxy for Claude Code / any agent
+  # Usage: docker compose --profile proxy up -d proxy
   proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile.proxy
-    image: smartsplit-proxy:latest
+    build: .
+    image: smartsplit:latest
+    command: ["--proxy-only", "--host", "0.0.0.0", "--port", "8420"]
     ports:
       - "8420:8420"
     env_file: .env

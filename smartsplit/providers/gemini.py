@@ -6,7 +6,7 @@ import httpx
 
 from smartsplit.exceptions import ProviderError
 from smartsplit.models import TokenUsage
-from smartsplit.providers.base import _EMPTY_USAGE, LLMProvider, _http_error_message
+from smartsplit.providers.base import _EMPTY_USAGE, LLMProvider, http_error_to_provider_error
 
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 _GEMINI_OPENAI_COMPAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
@@ -57,7 +57,7 @@ class GeminiProvider(LLMProvider):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, _http_error_message(e)) from e
+            raise http_error_to_provider_error(self.name, e) from e
         except httpx.TimeoutException as e:
             raise ProviderError(self.name, "Request timed out") from e
 
@@ -106,7 +106,7 @@ class GeminiProvider(LLMProvider):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, _http_error_message(e)) from e
+            raise http_error_to_provider_error(self.name, e) from e
         except httpx.TimeoutException as e:
             raise ProviderError(self.name, "Request timed out") from e
         try:

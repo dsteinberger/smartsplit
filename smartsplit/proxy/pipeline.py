@@ -1,6 +1,6 @@
-"""SmartSplit — Free multi-LLM backend with intelligent routing.
+"""SmartSplit — Multi-LLM backend with intelligent routing.
 
-An OpenAI-compatible endpoint that routes every request to the best free LLM
+An OpenAI-compatible endpoint that routes every request to the best worker LLM
 for the task. Works as a drop-in backend for Continue, Cline, Aider, or any
 OpenAI-compatible client.
 
@@ -41,7 +41,7 @@ from smartsplit.models import (
     TerminationState,
     short_id,
 )
-from smartsplit.providers.registry import _PROVIDER_CALL_TIMEOUT, ProviderRegistry
+from smartsplit.providers.registry import PROVIDER_CALL_TIMEOUT, ProviderRegistry
 from smartsplit.proxy.formats import (
     OpenAIRequest,
     anthropic_has_tool_named,
@@ -56,6 +56,7 @@ from smartsplit.proxy.formats import (
     extract_anthropic_prompt,
     extract_prompt,
     inject_anthropic_system_context,
+    is_internal_agent_call,
     iter_sse,
     openai_response_to_anthropic,
     response_to_sse_chunks,
@@ -69,10 +70,12 @@ from smartsplit.tools.anticipation import (
     extract_actual_tool_calls,
 )
 from smartsplit.tools.anticipator import ToolAnticipator
-from smartsplit.tools.intention_detector import IntentionDetector
+from smartsplit.tools.intention_detector import FAKE_TOOL_CONFIDENCE, IntentionDetector
 from smartsplit.tools.pattern_learner import ToolPatternLearner
-from smartsplit.triage.detector import _LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
+from smartsplit.tools.registry import adapt_args_to_schema, extract_tool_schemas, has_required_args
+from smartsplit.triage.detector import LLM_DETECT_MIN_CHARS, TriageDecision, detect, detect_with_llm
 from smartsplit.triage.enrichment import (
+    build_enriched_messages,
     enrich_and_forward,
     enrich_only,
 )
@@ -81,7 +84,6 @@ from smartsplit.triage.planner import Planner
 logger = logging.getLogger("smartsplit.proxy")
 
 _MAX_LOG_ENTRIES = 50
-_FAKE_TOOL_CONFIDENCE = 0.85  # higher than injection (0.7) — fake responses are riskier
 
 # Enrichment types useful in proxy mode — context_summary is redundant (brain has full context).
 _PROXY_USEFUL_ENRICHMENTS = {"web_search", "multi_perspective", "pre_analysis"}
@@ -143,6 +145,9 @@ class ProxyContext:
     )
     # Enrichment backoff — skip enrichment until this timestamp (set from retry-after on 429)
     enrichment_skip_until: float = 0.0  # 0 = enrichment allowed
+    # Last Google-ready query extracted by the enrichment phase — used for the
+    # FAKE web_search fallback when our Serper/Tavily call fails.
+    last_search_query: str = ""
 
 
 # ── Context factory ────────────────────────────────────────────
@@ -159,7 +164,7 @@ def build_proxy_context(cfg: SmartSplitConfig, mode: Mode, *, read_timeout: floa
         limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
     )
     quota = QuotaTracker(provider_configs=cfg.providers)
-    registry = ProviderRegistry(cfg.providers, http, free_llm_priority=cfg.free_llm_priority, brain_name=cfg.brain)
+    registry = ProviderRegistry(cfg.providers, http, worker_priority=cfg.worker_priority, brain_name=cfg.brain)
     planner = Planner(registry)
     bandit = BanditScorer()
     router = Router(registry, quota, cfg, bandit=bandit)
@@ -261,9 +266,23 @@ async def _try_fake_tool_use(ctx: ProxyContext, body_dict: dict, request_id: str
     if not openai_body:
         return None
     prediction = await ctx.detector.predict(openai_body.get("messages", []), openai_body.get("tools"))
-    fake_tools = [
-        {"tool": t.tool, "input": dict(t.args)} for t in prediction.tools if t.confidence >= _FAKE_TOOL_CONFIDENCE
-    ]
+    schemas = extract_tool_schemas(openai_body.get("tools"))
+    fake_tools: list[dict[str, object]] = []
+    for t in prediction.tools:
+        if t.confidence < FAKE_TOOL_CONFIDENCE:
+            continue
+        schema = schemas.get(t.tool)
+        adapted = adapt_args_to_schema(dict(t.args), schema)
+        if not has_required_args(adapted, schema):
+            logger.info(
+                "[%s] Dropping FAKE %s — missing required args: got %s, need %s",
+                request_id,
+                t.tool,
+                sorted(adapted.keys()),
+                sorted(schema.get("required", [])) if schema else [],
+            )
+            continue
+        fake_tools.append({"tool": t.tool, "input": adapted})
     if not fake_tools:
         return None
     ctx.anticipation_stats["predictions_made"] += 1
@@ -271,7 +290,7 @@ async def _try_fake_tool_use(ctx: ProxyContext, body_dict: dict, request_id: str
         "[%s] FAKE tool_use: %s (confidence>=%s)",
         request_id,
         [t["tool"] for t in fake_tools],
-        _FAKE_TOOL_CONFIDENCE,
+        FAKE_TOOL_CONFIDENCE,
     )
     return {"type": "fake", "body": build_fake_anthropic_tool_response(fake_tools, model=model)}
 
@@ -283,7 +302,7 @@ def _filter_useful_enrichments(
     if not ctx.enabled:
         return TriageDecision.TRANSPARENT, []
 
-    decision, enrichment_types = detect(triage_prompt, flat_messages)
+    decision, enrichment_types = detect(triage_prompt, flat_messages, proxy_mode=True)
     enrichment_types = [e for e in enrichment_types if e in _PROXY_USEFUL_ENRICHMENTS]
 
     # Drop web_search if we have neither a search provider nor a client-side search tool.
@@ -312,7 +331,7 @@ def _fake_web_search_fallback(
     ctx: ProxyContext, body_dict: dict, triage_prompt: str, model: str, request_id: str
 ) -> dict:
     """Build a FAKE tool_use action when our web_search failed but the agent has the tool."""
-    search_query = getattr(ctx, "_last_search_query", triage_prompt[:200])
+    search_query = ctx.last_search_query or triage_prompt[:200]
     agent_tool_name = "WebSearch" if anthropic_has_tool_named(body_dict, "WebSearch") else "web_search"
     logger.info("[%s] Serper failed → FAKE %s(%s)", request_id, agent_tool_name, search_query[:60])
     fake_tools = [{"tool": agent_tool_name, "input": {"query": search_query}}]
@@ -371,6 +390,13 @@ async def _run_pipeline(
       {"type": "modified", "body": dict} — body was modified (context injected)
       {"type": "passthrough"}            — nothing to do
     """
+    # Agent-internal background calls (auto-compact, title gen, task tracker, …)
+    # are text-generation requests the user never typed — forward as-is to avoid
+    # polluting their context with enrichment and wasting worker LLM budget on them.
+    if is_internal_agent_call(body_dict):
+        logger.debug("[%s] Internal agent call detected — skipping pipeline", request_id)
+        return {"type": "passthrough"}
+
     prompt = extract_anthropic_prompt(body_dict)
     triage_prompt = strip_agent_metadata(prompt)
     model = body_dict.get("model", "")
@@ -587,7 +613,7 @@ async def _forward_to_anthropic_host(
         )
 
     else:
-        async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
+        async with asyncio.timeout(PROVIDER_CALL_TIMEOUT):
             response = await ctx.http.post(url, headers=headers, json=proxy_body)
 
         if response.status_code in (429, 401, 403, 529):
@@ -631,7 +657,7 @@ async def _raw_passthrough(
     url = f"https://{host}/v1/messages"
     headers = dict(passthrough_headers)
     headers["Content-Type"] = "application/json"
-    async with asyncio.timeout(_PROVIDER_CALL_TIMEOUT):
+    async with asyncio.timeout(PROVIDER_CALL_TIMEOUT):
         response = await ctx.http.post(url, headers=headers, json=proxy_body)
         response.raise_for_status()
     return PipelineResult(body=response.json())
@@ -715,7 +741,7 @@ async def _triage_request(
     if not triage_prompt or not ctx.enabled:
         return TriageDecision.TRANSPARENT, []
     decision, enrichment_types = detect(triage_prompt, raw_messages)
-    if decision == TriageDecision.TRANSPARENT and len(triage_prompt.strip()) >= _LLM_DETECT_MIN_CHARS:
+    if decision == TriageDecision.TRANSPARENT and len(triage_prompt.strip()) >= LLM_DETECT_MIN_CHARS:
         decision, enrichment_types = await detect_with_llm(triage_prompt, ctx.registry)
     return decision, enrichment_types
 
@@ -764,18 +790,30 @@ async def _handle_agent_mode(
         # FAKE tool_use: predict read-only tools and return without hitting the brain.
         if ctx.detector and not has_tool_result:
             prediction = await ctx.detector.predict(body_dict.get("messages", []), parsed.tools)
-            fake_tools = [
-                {"tool": t.tool, "input": dict(t.args)}
-                for t in prediction.tools
-                if t.confidence >= _FAKE_TOOL_CONFIDENCE
-            ]
+            schemas = extract_tool_schemas(parsed.tools)
+            fake_tools: list[dict[str, object]] = []
+            for t in prediction.tools:
+                if t.confidence < FAKE_TOOL_CONFIDENCE:
+                    continue
+                schema = schemas.get(t.tool)
+                adapted = adapt_args_to_schema(dict(t.args), schema)
+                if not has_required_args(adapted, schema):
+                    logger.info(
+                        "[%s] Dropping FAKE %s — missing required args: got %s, need %s",
+                        request_id,
+                        t.tool,
+                        sorted(adapted.keys()),
+                        sorted(schema.get("required", [])) if schema else [],
+                    )
+                    continue
+                fake_tools.append({"tool": t.tool, "input": adapted})
             if fake_tools:
                 ctx.anticipation_stats["predictions_made"] += 1
                 logger.info(
                     "[%s] FAKE tool_use: %s (confidence>=%s)",
                     request_id,
                     [t["tool"] for t in fake_tools],
-                    _FAKE_TOOL_CONFIDENCE,
+                    FAKE_TOOL_CONFIDENCE,
                 )
                 if enrichment_task:
                     enrichment_task.cancel()
@@ -788,9 +826,9 @@ async def _handle_agent_mode(
         if enrichment_task:
             enrichment_results = await enrichment_task
             if enrichment_results:
-                from smartsplit.triage.enrichment import _build_enriched_messages
-
-                body_dict["messages"] = _build_enriched_messages(raw_messages, prompt, enrichment_results)
+                body_dict["messages"] = build_enriched_messages(
+                    body_dict.get("messages", []), prompt, enrichment_results
+                )
                 logger.info("[%s] Enriched agent request with %s worker results", request_id, len(enrichment_results))
 
         raw_response = await ctx.registry.proxy_to_brain(body_dict)

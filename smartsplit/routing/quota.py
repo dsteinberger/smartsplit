@@ -6,12 +6,21 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from smartsplit.models import ProviderType, SavingsReport
 
 if TYPE_CHECKING:
     from smartsplit.config import ProviderConfig
+
+
+class UsageEntry(TypedDict):
+    """Per-provider daily usage tally."""
+
+    count: int
+    last_reset: float
+    by_type: dict[str, int]
+
 
 logger = logging.getLogger("smartsplit.quota")
 
@@ -58,7 +67,7 @@ class QuotaTracker:
         provider_configs: dict[str, ProviderConfig] | None = None,
         persistence_path: str | None = None,
     ) -> None:
-        self._usage: dict[str, dict[str, int | float | dict[str, int]]] = {}
+        self._usage: dict[str, UsageEntry] = {}
         self._savings: dict[str, int] = {"free_calls": 0, "paid_calls": 0, "estimated_tokens_saved": 0}
         self._dirty = False
         self._last_save: float = 0.0
@@ -83,7 +92,10 @@ class QuotaTracker:
         prompt: str = "",
     ) -> None:
         self._maybe_reset(provider)
-        entry = self._usage.setdefault(provider, {"count": 0, "last_reset": time.time(), "by_type": {}})
+        entry = self._usage.setdefault(
+            provider,
+            UsageEntry(count=0, last_reset=time.time(), by_type={}),
+        )
         entry["count"] += 1
         entry["by_type"][task_type] = entry["by_type"].get(task_type, 0) + 1
 
@@ -106,19 +118,20 @@ class QuotaTracker:
         if entry is None:
             return
         if time.time() - entry.get("last_reset", time.time()) > _DAY_SECONDS:
-            self._usage[provider] = {"count": 0, "last_reset": time.time(), "by_type": {}}
+            self._usage[provider] = UsageEntry(count=0, last_reset=time.time(), by_type={})
             self._dirty = True
 
     def get_availability(self, provider: str) -> float:
         """Return a 0.0-1.0 ratio of remaining quota for *provider*."""
         self._maybe_reset(provider)
         limit = self._limits.get(provider, _DEFAULT_RPD)
-        entry = self._usage.get(provider, {"count": 0})
-        used = entry["count"]
+        entry = self._usage.get(provider)
+        used = entry["count"] if entry is not None else 0
         return max(0.0, (limit - used) / limit)
 
     def get_usage(self, provider: str) -> int:
-        return self._usage.get(provider, {}).get("count", 0)
+        entry = self._usage.get(provider)
+        return entry["count"] if entry is not None else 0
 
     def get_savings_report(self) -> SavingsReport:
         total = self._savings["free_calls"] + self._savings["paid_calls"]

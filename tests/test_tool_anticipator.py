@@ -340,7 +340,7 @@ class TestWebFetch:
         mock_http.get = AsyncMock(return_value=mock_response)
 
         registry = MagicMock()
-        registry._http = mock_http
+        registry.http_client = mock_http
 
         anticipator = ToolAnticipator(registry, working_dir=str(tmp_path))
         result = await anticipator._web_fetch("https://example.com")
@@ -361,7 +361,7 @@ class TestWebFetch:
         mock_http.get = AsyncMock(side_effect=Exception("connection refused"))
 
         registry = MagicMock()
-        registry._http = mock_http
+        registry.http_client = mock_http
 
         anticipator = ToolAnticipator(registry, working_dir=str(tmp_path))
         with pytest.raises(SmartSplitError, match="web_fetch"):
@@ -378,7 +378,7 @@ class TestWebFetch:
         mock_http.get = AsyncMock(return_value=mock_response)
 
         registry = MagicMock()
-        registry._http = mock_http
+        registry.http_client = mock_http
 
         anticipator = ToolAnticipator(registry, working_dir=str(tmp_path))
         result = await anticipator._web_fetch("https://example.com/huge")
@@ -658,7 +658,7 @@ class TestExecute:
         mock_http.get = AsyncMock(return_value=mock_response)
 
         registry = MagicMock()
-        registry._http = mock_http
+        registry.http_client = mock_http
 
         anticipator = ToolAnticipator(registry, working_dir=str(tmp_path))
 
@@ -812,7 +812,7 @@ class TestToolAlias:
         mock_http.get = AsyncMock(return_value=mock_response)
 
         registry = MagicMock()
-        registry._http = mock_http
+        registry.http_client = mock_http
 
         anticipator = ToolAnticipator(registry, working_dir=str(tmp_path))
 

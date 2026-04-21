@@ -1,7 +1,7 @@
 {
   "mode": "balanced",
   "brain": "",
-  "free_llm_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
+  "worker_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
   "providers": {
     "groq": {
       "api_key": "YOUR_GROQ_API_KEY",

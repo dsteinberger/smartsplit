@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from smartsplit.json_utils import extract_json
 from smartsplit.tools.intention_detector import AnticipatedTool
-from smartsplit.tools.pattern_learner import _extract_context_signals
+from smartsplit.tools.pattern_learner import extract_context_signals
 from smartsplit.tools.registry import (
     FILE_REF_RE as _FILE_REF_RE,
 )
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("smartsplit.anticipation")
 
-_SEARCH_QUERY_PROMPT = """\
+SEARCH_QUERY_PROMPT = """\
 Extract 1-3 short Google search queries from this user prompt. \
 Return ONLY a JSON array of query strings, nothing else.
 Focus on what specific information the user needs from the web.
@@ -53,7 +53,7 @@ Example: ["open source LLM routing frameworks 2025", "best AI proxy projects git
 --- END PROMPT ---"""
 
 
-def _extract_project_context(messages: list[dict]) -> str:
+def extract_project_context(messages: list[dict]) -> str:
     """Extract project context from system messages (first 500 chars)."""
     for msg in messages:
         if msg.get("role") == "system":
@@ -82,13 +82,13 @@ async def _fill_search_args(
     messages: list[dict],
     request_id: str,
 ) -> AnticipatedTool:
-    """Extract a structured search query via free LLM, falling back to the raw prompt."""
+    """Extract a structured search query via worker LLM, falling back to the raw prompt."""
     args = dict(t.args)
     query = user_prompt[:200]
     try:
-        context = _extract_project_context(messages)
-        raw = await ctx.registry.call_free_llm(
-            _SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", user_prompt[:500]),
+        context = extract_project_context(messages)
+        raw = await ctx.registry.call_worker_llm(
+            SEARCH_QUERY_PROMPT.replace("{context}", context).replace("{prompt}", user_prompt[:500]),
             prefer="cerebras",
         )
         parsed_q = json.loads(extract_json(raw))
@@ -110,7 +110,7 @@ async def _fill_missing_args(
 ) -> list:
     """Fill in missing args for anticipated tools.
 
-    The free LLM predictor often predicts the tool type but omits args.
+    The worker LLM predictor often predicts the tool type but omits args.
     We extract plausible args from the user prompt and context.
     """
     mentioned_files = list(dict.fromkeys(_FILE_REF_RE.findall(user_prompt)))
@@ -170,7 +170,7 @@ async def _run_anticipation(
         ctx.pattern_learner.record_prediction(
             request_id=request_id,
             predicted_tools=[{"tool": t.tool, "args": dict(t.args)} for t in prediction.tools],
-            context_signals=_extract_context_signals(messages_for_predict),
+            context_signals=extract_context_signals(messages_for_predict),
         )
 
     # Filter out files already in the conversation (already read or written)

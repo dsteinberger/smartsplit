@@ -25,15 +25,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("smartsplit.detector")
 
-# Minimum prompt length worth enriching
-_ENRICH_MIN_CHARS = 80
+# Minimum prompt length worth enriching (under this, signal/noise is too low)
+_ENRICH_MIN_CHARS = 50
+
+# Minimum prompt length for keyword-triggered pre_analysis
+_PRE_ANALYSIS_MIN_CHARS = 120
 
 # Conversation size thresholds for context summary enrichment
 _LONG_HISTORY_MESSAGES = 10
 _LONG_HISTORY_CHARS = 5000
 
 # Keywords that signal enrichment opportunities
-_COMPARISON_KEYWORDS = [
+_COMPARISON_KEYWORDS_BASE = [
     " vs ",
     " versus ",
     "compare",
@@ -44,7 +47,7 @@ _COMPARISON_KEYWORDS = [
     "tradeoff",
     "trade-off",
 ]
-_ANALYSIS_KEYWORDS = [
+_ANALYSIS_KEYWORDS_BASE = [
     "refactor",
     "review",
     "analyze",
@@ -56,13 +59,17 @@ _ANALYSIS_KEYWORDS = [
     "diagnose",
 ]
 
-# Merge multilingual keywords for comparison and analysis detection.
-for _kw_list in COMPARISON_KEYWORDS_I18N.values():
-    _COMPARISON_KEYWORDS.extend(_kw_list)
-_COMPARISON_KEYWORDS = list(dict.fromkeys(_COMPARISON_KEYWORDS))
-for _kw_list in ANALYSIS_KEYWORDS_I18N.values():
-    _ANALYSIS_KEYWORDS.extend(_kw_list)
-_ANALYSIS_KEYWORDS = list(dict.fromkeys(_ANALYSIS_KEYWORDS))
+
+def _merge_i18n_keywords(base: list[str], i18n: dict[str, list[str]]) -> list[str]:
+    """Flatten multilingual keyword lists onto the base, deduplicated while preserving order."""
+    merged = list(base)
+    for lang_kws in i18n.values():
+        merged.extend(lang_kws)
+    return list(dict.fromkeys(merged))
+
+
+_COMPARISON_KEYWORDS = _merge_i18n_keywords(_COMPARISON_KEYWORDS_BASE, COMPARISON_KEYWORDS_I18N)
+_ANALYSIS_KEYWORDS = _merge_i18n_keywords(_ANALYSIS_KEYWORDS_BASE, ANALYSIS_KEYWORDS_I18N)
 
 
 class TriageDecision(StrEnum):
@@ -80,11 +87,18 @@ def _has_tool_messages(messages: list[dict[str, str]]) -> bool:
 def detect(
     prompt: str,
     messages: list[dict[str, str]] | None = None,
+    *,
+    proxy_mode: bool = False,
 ) -> tuple[TriageDecision, list[str]]:
     """Fast heuristic detector — decides TRANSPARENT or ENRICH without LLM calls.
 
     Returns (decision, enrichment_types) where enrichment_types is a list of
     enrichment categories to run (e.g. ["web_search", "pre_analysis"]).
+
+    When ``proxy_mode`` is True, ``context_summary`` detection is skipped — the
+    brain already has the full conversation history in proxy mode, so
+    summarising it would be redundant (and the proxy pipeline filters it out
+    anyway via ``_PROXY_USEFUL_ENRICHMENTS``).
     """
     if not prompt:
         return TriageDecision.TRANSPARENT, []
@@ -98,11 +112,12 @@ def detect(
 
     # ── Early checks (before length filter) ──────────────────
 
-    # Long conversation history → context summary to save brain tokens
+    # Long conversation history → context summary to save brain tokens.
+    # Skipped in proxy mode where the brain already has the full history.
     # Only count user/assistant messages — system messages often contain large
     # injected files (IDE context) which don't indicate a long conversation.
     # Strip XML-tagged metadata from char count (agents inject large blocks).
-    if msgs:
+    if msgs and not proxy_mode:
         from smartsplit.proxy.formats import strip_agent_metadata
 
         conversation_msgs = [m for m in msgs if m.get("role") in ("user", "assistant")]
@@ -128,11 +143,11 @@ def detect(
         enrichments.append("multi_perspective")
 
     # Complex analysis prompts
-    if any(kw in prompt_lower for kw in _ANALYSIS_KEYWORDS) and len(prompt.strip()) > 200:
+    if any(kw in prompt_lower for kw in _ANALYSIS_KEYWORDS) and len(prompt.strip()) > _PRE_ANALYSIS_MIN_CHARS:
         enrichments.append("pre_analysis")
 
     # Multi-domain prompt (code + translation, math + writing, etc.)
-    if len(domain_names) >= 2 and len(prompt.strip()) > 200 and "pre_analysis" not in enrichments:
+    if len(domain_names) >= 2 and len(prompt.strip()) > _PRE_ANALYSIS_MIN_CHARS and "pre_analysis" not in enrichments:
         enrichments.append("pre_analysis")
 
     if enrichments:
@@ -144,7 +159,7 @@ def detect(
 
 
 # Minimum prompt length to justify an LLM classification call
-_LLM_DETECT_MIN_CHARS = 40
+LLM_DETECT_MIN_CHARS = 40
 
 _TRIAGE_PROMPT = """\
 You are a request triage engine. Decide if the user's prompt needs external enrichment.
@@ -159,10 +174,12 @@ Valid enrichment types:
 - "pre_analysis" — prompt requires deep analysis of complex code/architecture
 
 Rules:
-- MOST prompts are "transparent" — only enrich when it clearly adds value
-- "web_search" when real-world data improves the answer: finding projects, tools, libraries, current versions, news, benchmarks, documentation
-- NOT web_search: explaining concepts, writing code, answering from general knowledge, simple opinions
-- Code tasks, explanations, and simple questions are always transparent
+- Enrich when workers would meaningfully help the answer — otherwise keep it transparent.
+- "web_search" when real-world data would make the answer BETTER: current versions, recent news, benchmarks, finding projects/tools/libraries, up-to-date documentation.
+- NOT web_search: explaining well-known concepts, writing code from a clear spec, answering from general knowledge.
+- "multi_perspective" when the user is weighing options, frameworks, or approaches against each other (compare, vs, which is better, tradeoffs).
+- "pre_analysis" when the request involves deep analysis (refactor a module, review complex code/arch, audit for issues) AND has enough context to analyze (not a one-liner).
+- Simple questions and short prompts stay transparent.
 
 Respond with ONLY the JSON object, nothing else.
 Example: {"decision": "enrich", "enrichments": ["web_search"]}
@@ -178,11 +195,11 @@ async def detect_with_llm(
 ) -> tuple[TriageDecision, list[str]]:
     """LLM-based triage for prompts that keywords missed.
 
-    Uses a fast free LLM to decide if enrichment adds value.
+    Uses a fast worker LLM to decide if enrichment adds value.
     Returns TRANSPARENT if the LLM call fails or finds nothing enrichment-worthy.
     """
     try:
-        raw = await registry.call_free_llm(
+        raw = await registry.call_worker_llm(
             _TRIAGE_PROMPT + prompt + "\n--- END PROMPT ---",
             prefer="cerebras",
         )

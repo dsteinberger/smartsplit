@@ -3,7 +3,7 @@
 Pipeline:
 1. **Domain Detection** — classify which competency domains the prompt touches.
 2. **Routing Decision** — 1 domain = route direct; 2+ domains = decompose.
-3. **Decomposition** — split along domain boundaries via free LLM.
+3. **Decomposition** — split along domain boundaries via worker LLM.
 4. **Context Injection** — attach a shared context summary to each subtask.
 5. **Limit Enforcement** — cap subtask count per mode (economy=3, balanced=5, quality=8).
 6. **Synthesis** — combine subtask results into a coherent response.
@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from smartsplit.exceptions import SmartSplitError
 from smartsplit.json_utils import extract_json
 from smartsplit.models import Complexity, Mode, RouteResult, Subtask, TaskType
+from smartsplit.triage.i18n_keywords import DOMAIN_KEYWORDS_I18N
 
 if TYPE_CHECKING:
     from smartsplit.providers.registry import ProviderRegistry
@@ -42,7 +43,7 @@ MAX_SUBTASKS: dict[Mode, int] = {
 
 # Keyword heuristics for fast domain classification.
 # Each domain maps to a set of trigger words/patterns.
-_DOMAIN_KEYWORDS: dict[str, list[str]] = {
+_DOMAIN_KEYWORDS_BASE: dict[str, list[str]] = {
     "code": [
         "function",
         "class",
@@ -254,15 +255,21 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
-# Merge multilingual keywords into domain lists (deduplicated).
-from smartsplit.triage.i18n_keywords import DOMAIN_KEYWORDS_I18N as _I18N  # noqa: E402
 
-for _lang_keywords in _I18N.values():
-    for _domain, _keywords in _lang_keywords.items():
-        if _domain in _DOMAIN_KEYWORDS:
-            _DOMAIN_KEYWORDS[_domain].extend(_keywords)
-for _domain in _DOMAIN_KEYWORDS:
-    _DOMAIN_KEYWORDS[_domain] = list(dict.fromkeys(_DOMAIN_KEYWORDS[_domain]))
+def _merge_i18n_domain_keywords(
+    base: dict[str, list[str]],
+    i18n: dict[str, dict[str, list[str]]],
+) -> dict[str, list[str]]:
+    """Merge per-language keyword lists into the base domain dict, deduplicated."""
+    merged = {domain: list(keywords) for domain, keywords in base.items()}
+    for lang_keywords in i18n.values():
+        for domain, keywords in lang_keywords.items():
+            if domain in merged:
+                merged[domain].extend(keywords)
+    return {domain: list(dict.fromkeys(words)) for domain, words in merged.items()}
+
+
+_DOMAIN_KEYWORDS: dict[str, list[str]] = _merge_i18n_domain_keywords(_DOMAIN_KEYWORDS_BASE, DOMAIN_KEYWORDS_I18N)
 
 # Map keyword groups to TaskType values.
 _DOMAIN_TO_TASK_TYPE: dict[str, TaskType] = {
@@ -417,7 +424,7 @@ class Planner:
         Returns a list of domain name strings ordered by relevance.
         """
         try:
-            raw = await self._registry.call_free_llm(
+            raw = await self._registry.call_worker_llm(
                 _CLASSIFY_PROMPT + prompt + "\n--- END PROMPT ---",
                 prefer="groq",
             )
@@ -468,7 +475,7 @@ class Planner:
             + "\n--- END USER PROMPT ---"
         )
 
-        raw = await self._registry.call_free_llm(decompose_prompt, prefer="groq")
+        raw = await self._registry.call_worker_llm(decompose_prompt, prefer="groq")
         parsed = json.loads(extract_json(raw))
         if isinstance(parsed, dict):
             parsed = [parsed]
@@ -582,14 +589,14 @@ class Planner:
     async def _generate_context_summary(
         self, original_prompt: str, messages: list[dict[str, str]] | None
     ) -> str | None:
-        """Call the free LLM for a shared context summary, or ``None`` if it's unusable."""
+        """Call the worker LLM for a shared context summary, or ``None`` if it's unusable."""
         if messages and len(messages) > 1:
             conversation = "\n".join(f"[{m['role']}]: {m['content'][:200]}" for m in messages)
             context_input = f"Conversation:\n{conversation}\n\nLatest prompt: {original_prompt}"
         else:
             context_input = original_prompt
 
-        raw = await self._registry.call_free_llm(_CONTEXT_SUMMARY_TEMPLATE + context_input, prefer="groq")
+        raw = await self._registry.call_worker_llm(_CONTEXT_SUMMARY_TEMPLATE + context_input, prefer="groq")
         summary = raw.strip()
         if not summary:
             logger.warning("Context injection skipped: empty summary from LLM")
@@ -610,7 +617,7 @@ class Planner:
                 f"Subtask results:\n{results_text}\n\n"
                 "Provide a clear, unified response. Do not mention subtasks or routing."
             )
-            return await self._registry.call_free_llm(
+            return await self._registry.call_worker_llm(
                 synth_prompt,
                 prefer="groq",
             )

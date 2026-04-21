@@ -41,7 +41,7 @@ def _make_ctx(
 
     ctx.pattern_learner = pattern_learner
     ctx.registry = registry or MagicMock()
-    ctx.registry.call_free_llm = AsyncMock(return_value='["query1"]')
+    ctx.registry.call_worker_llm = AsyncMock(return_value='["query1"]')
 
     ctx.anticipation_stats = {
         "requests_with_tools": 0,
@@ -116,7 +116,7 @@ class TestFillMissingArgs:
     async def test_search_tool_extracts_query_via_llm(self):
         """Search tool without query calls LLM to extract search queries."""
         ctx = _make_ctx()
-        ctx.registry.call_free_llm = AsyncMock(return_value='["best python frameworks 2025"]')
+        ctx.registry.call_worker_llm = AsyncMock(return_value='["best python frameworks 2025"]')
         predictions = [
             AnticipatedTool(tool="web_search", args={}, reason="search", confidence=0.9),
         ]
@@ -124,13 +124,13 @@ class TestFillMissingArgs:
         assert len(result) == 1
         assert result[0].tool == "web_search"
         assert "best python frameworks 2025" in result[0].args["query"]
-        ctx.registry.call_free_llm.assert_awaited_once()
+        ctx.registry.call_worker_llm.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_search_tool_query_extraction_failure_falls_back(self):
         """Search query extraction failure falls back to raw prompt[:200]."""
         ctx = _make_ctx()
-        ctx.registry.call_free_llm = AsyncMock(side_effect=RuntimeError("LLM down"))
+        ctx.registry.call_worker_llm = AsyncMock(side_effect=RuntimeError("LLM down"))
         user_prompt = "what are the best python web frameworks"
         predictions = [
             AnticipatedTool(tool="web_search", args={}, reason="search", confidence=0.9),
@@ -181,7 +181,7 @@ class TestFillMissingArgs:
     async def test_search_uses_project_context_from_system_msg(self):
         """Search query extraction uses project context from system messages."""
         ctx = _make_ctx()
-        ctx.registry.call_free_llm = AsyncMock(return_value='["smartsplit proxy setup"]')
+        ctx.registry.call_worker_llm = AsyncMock(return_value='["smartsplit proxy setup"]')
         messages = [{"role": "system", "content": "This is SmartSplit, a proxy anticipateur."}]
         predictions = [
             AnticipatedTool(tool="web_search", args={}, reason="search", confidence=0.9),
@@ -189,7 +189,7 @@ class TestFillMissingArgs:
         result = await _fill_missing_args(ctx, "req-1", predictions, "how do I set this up", messages)
         assert len(result) == 1
         # Verify the LLM was called (context extraction happened)
-        call_args = ctx.registry.call_free_llm.call_args[0][0]
+        call_args = ctx.registry.call_worker_llm.call_args[0][0]
         assert "SmartSplit" in call_args
 
     @pytest.mark.asyncio

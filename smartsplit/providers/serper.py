@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 
 from smartsplit.exceptions import ProviderError
-from smartsplit.providers.base import SearchProvider, _http_error_message
+from smartsplit.providers.base import SearchProvider, http_error_to_provider_error
 
 
 class SerperProvider(SearchProvider):
@@ -21,7 +21,7 @@ class SerperProvider(SearchProvider):
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ProviderError(self.name, _http_error_message(e)) from e
+            raise http_error_to_provider_error(self.name, e) from e
         except httpx.TimeoutException as e:
             raise ProviderError(self.name, "Request timed out") from e
         try:

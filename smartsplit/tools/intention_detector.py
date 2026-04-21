@@ -22,8 +22,9 @@ from typing import TYPE_CHECKING
 from smartsplit.exceptions import SmartSplitError
 from smartsplit.json_utils import extract_json
 from smartsplit.tools.registry import FILE_REF_RE as _FILE_REF_RE
-from smartsplit.tools.registry import SAFE_TOOLS
+from smartsplit.tools.registry import SAFE_TOOLS, extract_tool_schemas, split_joined_paths
 from smartsplit.tools.registry import WELL_KNOWN_FILES as _WELL_KNOWN_FILES
+from smartsplit.triage.i18n_keywords import INTENT_KEYWORDS_I18N
 
 if TYPE_CHECKING:
     from smartsplit.providers.registry import ProviderRegistry
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("smartsplit.intention_detector")
 
 _MIN_CONFIDENCE = 0.7  # conservative: 10% irrelevant content → -23% quality (context rot research)
-_FAKE_CONFIDENCE = 0.85  # threshold for FAKE tool_use — skip LLM if rules already reach this
+FAKE_TOOL_CONFIDENCE = 0.85  # threshold for FAKE tool_use — shared with proxy pipeline
 
 # ── Data classes ────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ _NULL_PREDICTION = Prediction(should_anticipate=False, confidence=0.0, tools=[])
 # without needing an LLM prediction.
 
 # Intent keywords — English base + multilingual from i18n_keywords.py
-_FIX_KEYWORDS = [
+_FIX_KEYWORDS_BASE = [
     "fix",
     "bug",
     "error",
@@ -80,7 +81,7 @@ _FIX_KEYWORDS = [
     "ValueError",
     "undefined",
 ]
-_SEARCH_KEYWORDS = [
+_SEARCH_KEYWORDS_BASE = [
     "find",
     "where",
     "locate",
@@ -90,19 +91,20 @@ _SEARCH_KEYWORDS = [
     "usage of",
     "defined",
 ]
-_TEST_KEYWORDS = ["test", "tests", "spec", "coverage", "unit test", "integration test"]
+_TEST_KEYWORDS_BASE = ["test", "tests", "spec", "coverage", "unit test", "integration test"]
 
-# Merge multilingual intent keywords
-from smartsplit.triage.i18n_keywords import INTENT_KEYWORDS_I18N  # noqa: E402
 
-for _lang_kw in INTENT_KEYWORDS_I18N.values():
-    _FIX_KEYWORDS.extend(_lang_kw.get("fix_debug", []))
-    _SEARCH_KEYWORDS.extend(_lang_kw.get("search", []))
-    _TEST_KEYWORDS.extend(_lang_kw.get("test", []))
-# Deduplicate
-_FIX_KEYWORDS = list(dict.fromkeys(_FIX_KEYWORDS))
-_SEARCH_KEYWORDS = list(dict.fromkeys(_SEARCH_KEYWORDS))
-_TEST_KEYWORDS = list(dict.fromkeys(_TEST_KEYWORDS))
+def _merge_intent_keywords(base: list[str], key: str) -> list[str]:
+    """Merge per-language intent keywords from INTENT_KEYWORDS_I18N under a named bucket."""
+    merged = list(base)
+    for lang_kw in INTENT_KEYWORDS_I18N.values():
+        merged.extend(lang_kw.get(key, []))
+    return list(dict.fromkeys(merged))
+
+
+_FIX_KEYWORDS = _merge_intent_keywords(_FIX_KEYWORDS_BASE, "fix_debug")
+_SEARCH_KEYWORDS = _merge_intent_keywords(_SEARCH_KEYWORDS_BASE, "search")
+_TEST_KEYWORDS = _merge_intent_keywords(_TEST_KEYWORDS_BASE, "test")
 
 _STACKTRACE_RE = re.compile(r"(File \"([^\"]+)\", line \d+|at .+\((.+\.\w+:\d+)\))", re.MULTILINE)
 
@@ -138,18 +140,35 @@ def _looks_like_project_path(path: str) -> bool:
     return "/" in path or path.startswith(".") or path in _WELL_KNOWN_FILES or ext in _CODE_EXTENSIONS
 
 
-def _predict_file_mentions(user_content: str) -> tuple[list[AnticipatedTool], list[str]]:
+def _pick_read_tool(tool_names: set[str]) -> str:
+    """Return the read-file tool name the client exposes, or the canonical handler."""
+    return "Read" if "Read" in tool_names else "read_file"
+
+
+def _pick_grep_tool(tool_names: set[str]) -> str:
+    """Return the grep tool name the client exposes, or the canonical handler."""
+    return "Grep" if "Grep" in tool_names else "grep"
+
+
+def _predict_file_mentions(user_content: str, tool_names: set[str]) -> tuple[list[AnticipatedTool], list[str]]:
     """Rule 1: file paths referenced in the prompt → read them."""
-    raw = list(dict.fromkeys(_FILE_REF_RE.findall(user_content)))
+    matched = _FILE_REF_RE.findall(user_content)
+    expanded: list[str] = []
+    for m in matched:
+        expanded.extend(split_joined_paths(m))
+    raw = list(dict.fromkeys(expanded))
     paths = [p for p in raw if _looks_like_project_path(p)]
+    read_tool = _pick_read_tool(tool_names)
     tools = [
-        AnticipatedTool(tool="read_file", args={"path": path}, reason="file mentioned in prompt", confidence=0.95)
+        AnticipatedTool(tool=read_tool, args={"path": path}, reason="file mentioned in prompt", confidence=0.95)
         for path in paths[:3]
     ]
     return tools, paths
 
 
-def _predict_stacktrace(user_content: str, existing: list[AnticipatedTool]) -> list[AnticipatedTool]:
+def _predict_stacktrace(
+    user_content: str, existing: list[AnticipatedTool], tool_names: set[str]
+) -> list[AnticipatedTool]:
     """Rule 2: stacktrace pasted → read files from the trace (skip dups)."""
     trace_files: list[str] = []
     for match in _STACKTRACE_RE.finditer(user_content):
@@ -158,27 +177,32 @@ def _predict_stacktrace(user_content: str, existing: list[AnticipatedTool]) -> l
         elif match.group(3):  # JS/TS: at foo (path:line)
             trace_files.append(match.group(3).split(":")[0])
     known = {t.args.get("path") for t in existing}
+    read_tool = _pick_read_tool(tool_names)
     return [
-        AnticipatedTool(tool="read_file", args={"path": path}, reason="file from stacktrace", confidence=0.93)
+        AnticipatedTool(tool=read_tool, args={"path": path}, reason="file from stacktrace", confidence=0.93)
         for path in list(dict.fromkeys(trace_files))[:2]
         if path not in known
     ]
 
 
-def _predict_grep_intent(prompt_lower: str) -> AnticipatedTool | None:
+def _predict_grep_intent(prompt_lower: str, tool_names: set[str]) -> AnticipatedTool | None:
     """Rules 3 & 4: search or error intent without known paths → grep."""
+    grep_tool = _pick_grep_tool(tool_names)
     if any(kw in prompt_lower for kw in _SEARCH_KEYWORDS):
-        return AnticipatedTool(tool="grep", args={}, reason="search intent detected", confidence=0.85)
+        return AnticipatedTool(tool=grep_tool, args={}, reason="search intent detected", confidence=0.85)
     if any(kw in prompt_lower for kw in _FIX_KEYWORDS):
-        return AnticipatedTool(tool="grep", args={}, reason="error/debug intent detected", confidence=0.80)
+        return AnticipatedTool(tool=grep_tool, args={}, reason="error/debug intent detected", confidence=0.80)
     return None
 
 
-def _predict_test_files(prompt_lower: str, paths: list[str], existing: list[AnticipatedTool]) -> list[AnticipatedTool]:
+def _predict_test_files(
+    prompt_lower: str, paths: list[str], existing: list[AnticipatedTool], tool_names: set[str]
+) -> list[AnticipatedTool]:
     """Rule 5: test intent → also read the likely test file for mentioned .py sources."""
     if not (any(kw in prompt_lower for kw in _TEST_KEYWORDS) and paths):
         return []
     known = {t.args.get("path") for t in existing}
+    read_tool = _pick_read_tool(tool_names)
     out: list[AnticipatedTool] = []
     for path in paths[:1]:
         name = path.rsplit("/", 1)[-1]
@@ -189,7 +213,7 @@ def _predict_test_files(prompt_lower: str, paths: list[str], existing: list[Anti
         if test_path not in known:
             out.append(
                 AnticipatedTool(
-                    tool="read_file",
+                    tool=read_tool,
                     args={"path": test_path},
                     reason="test intent: likely test file",
                     confidence=0.80,
@@ -198,22 +222,23 @@ def _predict_test_files(prompt_lower: str, paths: list[str], existing: list[Anti
     return out
 
 
-def _predict_from_rules(user_content: str) -> Prediction:
+def _predict_from_rules(user_content: str, tool_names: set[str]) -> Prediction:
     """Predict tool calls from prompt patterns — no LLM needed.
 
     Based on research: 90%+ of first tool calls are predictable from the prompt.
     Priority: file mentions > stacktrace > search intent > explain/fix/test intent.
+    Tool names emitted match what the client exposes (e.g. ``Read`` vs ``read_file``).
     """
-    tools, paths = _predict_file_mentions(user_content)
-    tools.extend(_predict_stacktrace(user_content, tools))
+    tools, paths = _predict_file_mentions(user_content, tool_names)
+    tools.extend(_predict_stacktrace(user_content, tools, tool_names))
 
     prompt_lower = user_content.lower()
     if not tools:
-        grep = _predict_grep_intent(prompt_lower)
+        grep = _predict_grep_intent(prompt_lower, tool_names)
         if grep is not None:
             tools.append(grep)
 
-    tools.extend(_predict_test_files(prompt_lower, paths, tools))
+    tools.extend(_predict_test_files(prompt_lower, paths, tools, tool_names))
 
     tools = tools[:3]
     if not tools:
@@ -235,14 +260,17 @@ _PREDICT_FROM_USER_TEMPLATE = (
     "list of available tools, predict which READ-ONLY tools the assistant will call first.\n\n"
     "You may ONLY predict these safe tools: {safe_tools}\n\n"
     "Available tools in this session: {available_tools}\n\n"
+    "Tool schemas (you MUST supply every required argument):\n{tool_schemas}\n\n"
     "Rules:\n"
     "- Predict ONLY read-only tools (file reads, searches, directory listings)\n"
     "- Do NOT predict write tools (edit, write, execute, delete, etc.)\n"
+    "- You MUST provide ALL required arguments for each predicted tool\n"
+    "- If you cannot infer a required argument from the message, DO NOT predict that tool\n"
     "- Be conservative — only predict calls you are highly confident about\n"
     "- Maximum 3 predictions\n\n"
     "Respond with ONLY this JSON (no other text):\n"
     '{{"should_anticipate": true/false, "confidence": 0.0-1.0, "anticipated_tools": ['
-    '{{"tool": "tool_name", "args": {{}}, "reason": "why", "confidence": 0.0-1.0}}]}}\n\n'
+    '{{"tool": "tool_name", "args": {{"required_key": "value"}}, "reason": "why", "confidence": 0.0-1.0}}]}}\n\n'
     "--- USER MESSAGE ---\n"
 )
 
@@ -293,31 +321,34 @@ class IntentionDetector:
         last = messages[-1]
         role = last.get("role", "")
 
-        # Phase 1: Rule-based prediction — if user mentions files, predict read_file
+        # Phase 1: Rule-based prediction — if user mentions files, predict read_file.
+        # We pass the client's tool names so the rules emit the exact name the
+        # client exposes (e.g. ``Read`` vs canonical ``read_file``). Otherwise the
+        # FAKE tool_use would carry a name the agent doesn't recognise.
+        tool_names = set(_extract_tool_names(available_tools))
         rule_prediction = _NULL_PREDICTION
         if role == "user":
             content = last.get("content", "")
             if content:
-                rule_prediction = _predict_from_rules(content)
+                rule_prediction = _predict_from_rules(content, tool_names)
 
         # Phase 2: LLM-based prediction — skip if:
-        # - Rules already have high confidence (saves free LLM quota)
-        # - All free workers are in circuit breaker (avoids cascading 429s)
+        # - Rules already have high confidence (saves worker LLM quota)
+        # - All workers are in circuit breaker (avoids cascading 429s)
         llm_prediction = _NULL_PREDICTION
-        if rule_prediction.confidence < _FAKE_CONFIDENCE:
+        if rule_prediction.confidence < FAKE_TOOL_CONFIDENCE:
             try:
-                priority = self._registry._free_llm_priority
-                providers = self._registry._providers
-                if not isinstance(priority, list) or not isinstance(providers, dict):
-                    has_healthy_worker = True
+                priority = self._registry.worker_priority
+                if not isinstance(priority, list):
+                    has_healthy_worker = True  # mock registry — assume available
                 else:
                     has_healthy_worker = any(
                         self._registry.circuit_breaker.is_healthy(name)
                         for name in priority
-                        if providers.get(name) is not None
+                        if self._registry.get(name) is not None
                     )
             except (AttributeError, TypeError):
-                has_healthy_worker = True  # assume available if registry doesn't support check
+                has_healthy_worker = True  # tolerate registries without this API
             if has_healthy_worker:
                 if role == "user":
                     content = last.get("content", "")
@@ -365,8 +396,14 @@ class IntentionDetector:
                 all_tools.append(t)
                 seen_keys.add(key)
 
-        # Add pattern suggestions (skip duplicates)
+        # Add pattern suggestions (skip duplicates and non-safe tools)
         for s in pattern_suggestions:
+            tool_name = s.get("tool")
+            # Hard safety gate: patterns can learn write tools from observed sessions,
+            # but anticipating them would execute arbitrary shell / file writes.
+            if tool_name not in SAFE_TOOLS:
+                logger.debug("Skipping non-safe pattern suggestion: %s", tool_name)
+                continue
             raw_args = s.get("args", {})
             if isinstance(raw_args, str):
                 try:
@@ -375,17 +412,26 @@ class IntentionDetector:
                     raw_args = {}
             if not isinstance(raw_args, dict):
                 raw_args = {}
-            key = s["tool"] + ":" + str(raw_args.get("path", ""))
+            key = str(tool_name) + ":" + str(raw_args.get("path", ""))
             if key not in seen_keys:
                 all_tools.append(
                     AnticipatedTool(
-                        tool=s["tool"],
+                        tool=str(tool_name),
                         args=raw_args,
                         reason="pattern:" + s.get("source", "learned"),
                         confidence=s.get("confidence", 0.7),
                     )
                 )
                 seen_keys.add(key)
+
+        # Final safety gate (defense in depth): SAFE_TOOLS only, whatever the source.
+        # Rules produce only safe tools by construction and LLM predictions are
+        # filtered in _call_and_parse, but a global filter here guarantees no
+        # write tool can slip through if those paths ever change.
+        before = len(all_tools)
+        all_tools = [t for t in all_tools if t.tool in SAFE_TOOLS]
+        if len(all_tools) < before:
+            logger.warning("Merged prediction: dropped %d non-safe tool(s)", before - len(all_tools))
 
         # Sort by confidence, cap at 3
         all_tools.sort(key=lambda t: t.confidence, reverse=True)
@@ -414,10 +460,13 @@ class IntentionDetector:
         if not safe_tool_names:
             return _NULL_PREDICTION
 
-        safe_str = ", ".join(sorted(SAFE_TOOLS))
+        safe_str = ", ".join(safe_tool_names)
         avail_str = ", ".join(tool_names) if tool_names else "(not specified)"
+        schemas_str = _format_tool_schemas_for_prompt(available_tools, safe_tool_names)
         prompt = (
-            _PREDICT_FROM_USER_TEMPLATE.replace("{safe_tools}", safe_str).replace("{available_tools}", avail_str)
+            _PREDICT_FROM_USER_TEMPLATE.replace("{safe_tools}", safe_str)
+            .replace("{available_tools}", avail_str)
+            .replace("{tool_schemas}", schemas_str)
             + user_content[:2000]
         )
 
@@ -445,9 +494,9 @@ class IntentionDetector:
         return await self._call_and_parse(prompt)
 
     async def _call_and_parse(self, prompt: str) -> Prediction:
-        """Send prompt to free LLM, parse JSON response into Prediction."""
+        """Send prompt to worker LLM, parse JSON response into Prediction."""
         try:
-            raw = await self._registry.call_free_llm(prompt, prefer="cerebras")
+            raw = await self._registry.call_worker_llm(prompt, prefer="cerebras")
             cleaned = extract_json(raw)
             data = json.loads(cleaned)
 
@@ -502,6 +551,27 @@ class IntentionDetector:
 
 
 # ── Helpers ─────────────────────────────────────────────────
+
+
+def _format_tool_schemas_for_prompt(tools: list[dict[str, str]] | None, safe_tool_names: list[str]) -> str:
+    """Format required/optional args per tool so the LLM knows what to emit."""
+    schemas = extract_tool_schemas(tools)
+    lines: list[str] = []
+    for name in safe_tool_names:
+        schema = schemas.get(name)
+        if not schema:
+            continue
+        required = sorted(schema.get("required", set()))
+        properties = sorted(schema.get("properties", set()))
+        optional = [p for p in properties if p not in required]
+        parts: list[str] = []
+        if required:
+            parts.append("required=[" + ", ".join(required) + "]")
+        if optional:
+            parts.append("optional=[" + ", ".join(optional) + "]")
+        if parts:
+            lines.append("- " + name + ": " + ", ".join(parts))
+    return "\n".join(lines) if lines else "(no schema information available)"
 
 
 def _extract_tool_names(available_tools: list[dict[str, str]] | None) -> list[str]:

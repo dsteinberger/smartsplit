@@ -15,6 +15,8 @@
 One brain to think, many models to prepare. Each LLM does what it does best.<br>
 Works with any mix of free and paid providers.
 
+**13 providers** · **7+ IDE integrations** · **MIT**
+
 [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Providers](#providers) · [Metrics](#metrics)
 
 </div>
@@ -48,23 +50,17 @@ Agent: "Fix the bug in parser.py"
 ```
 Agent: "Fix the bug in parser.py"
 
-  → SmartSplit predicts read_file(parser.py) — FAKE tool_use
+  → SmartSplit predicts read_file(parser.py) — FAKE tool_use (~200ms)
   → Agent reads the file itself, instantly
   → Brain already has the context, responds in one shot
-  = 1 round-trip saved, brain thinks faster
+  = 1 round-trip saved · ~40% less latency · 0 tokens wasted
 ```
 
 Same tool. Faster answers. No config change.
 
 ### What makes SmartSplit different
 
-**Multiply your free tier.** Instead of burning through one provider's quota, SmartSplit spreads requests across all your configured providers — each one contributing its free tier. More providers = more capacity.
-
-**Self-healing.** A provider goes down or hits its rate limit? You won't even notice. SmartSplit detects failures, disables the provider temporarily, and routes to the next best one — automatically.
-
-**Web-aware.** When your prompt needs current data ("latest", "news", "2026"...), SmartSplit detects it and searches the web before answering. No plugin needed — it's built in.
-
-**Stretch your paid tokens.** Got an OpenAI or Anthropic API key? Add it, and SmartSplit picks the right model for each task automatically:
+**Get more from every key — free or paid.** One free tier runs out fast; one paid key drains faster than you think. SmartSplit spreads requests across all your providers — each contributing its free quota, each specialized for what it does best. Got an OpenAI or Anthropic key too? It picks the right tier per task automatically — cheap model for boilerplate, top model for reasoning. More providers = more capacity. Smarter routing = budget that lasts.
 
 ```
 Simple task (boilerplate, summary)  → Haiku / GPT-4o-mini  (cheap)
@@ -72,7 +68,28 @@ Complex task (code, reasoning)      → Sonnet / GPT-4o      (best)
 Everything else                     → Free models first
 ```
 
-No config needed — SmartSplit detects task complexity and chooses the best model tier automatically.
+**Faster responses.** SmartSplit predicts what your brain will ask for — files, greps, searches — and returns it instantly as a FAKE tool call. Your agent executes locally, the brain skips a full round-trip. Less waiting, fewer tokens, every request.
+
+**Keep your Claude subscription.** Already paying for Claude Pro or Max? Don't cancel it — supercharge it. SmartSplit plugs in as an HTTPS proxy, your Claude Code authentication stays untouched, and round-trips get cut automatically. No API key swap, no workflow change.
+
+**Gets smarter over time.** A pattern learner observes your actual tool calls (Wilson-scored confidence); adaptive routing (MAB/UCB1) auto-calibrates provider scores from real results. The more you use SmartSplit, the sharper its predictions get.
+
+<details>
+<summary><b>More — reliability, safety, i18n, compatibility</b></summary>
+
+**Robust by default.** Provider down? Circuit breaker opens with exponential backoff and reroutes. Prediction misses, enrichment fails, brain refuses? The request silently falls through as a transparent proxy. You never see an error that wouldn't have happened without SmartSplit.
+
+**Read‑only by design.** SmartSplit only anticipates *reads* — files, greps, web searches. It never writes, never edits, never executes. Sandboxed to your working directory, 5s timeout, no exceptions. Safer than your own shell.
+
+**Web-aware in 9 languages.** When your prompt needs current data — in English, French, Spanish, Portuguese, German, Chinese, Japanese, Korean, or Russian — SmartSplit detects it, runs a **mini research agent** (plan queries → search → read & synthesize → optional gap-fill) under a strict 7 s budget, and feeds *sourced findings* to your brain. Each fact arrives with a confidence level and a URL, not a blob of snippets. If any step times out, the pipeline gracefully degrades to raw snippets — never blocks the response.
+
+**Domain-specialized analysis.** When your prompt needs deep pre-analysis or a multi-perspective comparison, SmartSplit picks the right template for the detected domain — code, math, creative, writing, factual — and routes the work to the worker that's strongest on *that specific combination* (e.g. `reasoning.math` prefers Gemini/DeepSeek, `reasoning.creative` prefers Claude/Mistral). One less generic "please analyze" prompt, one more structured checklist the brain can cite.
+
+**One format, any backend.** Your tool talks OpenAI. SmartSplit translates to Anthropic, Gemini, or whatever brain you configure — SSE streaming preserved. Swap the engine without swapping the wheel.
+
+**Cache‑friendly enrichment.** Context is injected surgically (last user message) so Anthropic's prompt cache keeps hitting. Other proxies break the cache on every request — yours doesn't.
+
+</details>
 
 ---
 
@@ -101,9 +118,12 @@ smartsplit
 
 ```
   SmartSplit — Multi-LLM backend
-  http://127.0.0.1:8420/v1
-  Mode: balanced
+  API:    http://127.0.0.1:8420/v1
+  Proxy:  http://127.0.0.1:8421   (HTTPS_PROXY for Claude Code)
+  Mode:   balanced
 ```
+
+> API + HTTPS proxy run side by side in one process. Use `--api-only` or `--proxy-only` to run just one.
 
 <details>
 <summary><b>Or use Docker</b></summary>
@@ -128,16 +148,18 @@ docker compose up -d
 Claude Code connects via HTTPS proxy — SmartSplit intercepts requests transparently.
 
 ```bash
-# Terminal 1: start the proxy (generates certs on first run)
-smartsplit --proxy
+# Terminal 1: start SmartSplit (API + proxy unified — default)
+smartsplit
 
-# Terminal 2: launch Claude Code through SmartSplit
+# Terminal 2: launch Claude Code through the proxy
 NODE_EXTRA_CA_CERTS=~/.smartsplit/certs/ca-cert.pem \
-HTTPS_PROXY=http://localhost:8420 \
+HTTPS_PROXY=http://localhost:8421 \
 claude
 ```
 
 That's it — Claude Code's tool calls are now anticipated by SmartSplit, saving round-trips automatically.
+
+> Only running Claude Code? Use `smartsplit --proxy-only` to skip the API endpoint (proxy then listens on :8420).
 </details>
 
 <details>
@@ -234,10 +256,10 @@ flowchart TD
     A -->|"No"| DET{"Triage"}
     DET -->|"TRANSPARENT"| BRAIN(["Brain LLM"])
     DET -->|"ENRICH"| EN["Workers run in parallel"]
-    EN --> WEB["Web search"]
-    EN --> ANA["Pre-analysis"]
-    EN --> CMP["Multi-perspective"]
-    WEB --> INJ["Inject results into request"]
+    EN --> WEB["Research agent<br/>PLAN → SEARCH → READ → GAP"]
+    EN --> ANA["Pre-analysis<br/>(domain-specialized template)"]
+    EN --> CMP["Multi-perspective<br/>(domain-specialized template)"]
+    WEB --> INJ["Inject structured<br/>findings into request"]
     ANA --> INJ
     CMP --> INJ
     INJ --> BRAIN
@@ -271,12 +293,17 @@ Without tools, SmartSplit goes straight to triage: **TRANSPARENT** (forward dire
 ```
 "What are the new features in Python 3.13?"
 
-  [web_search]        → search engine
-  [pre_analysis]      → reasoning worker
-  [multi_perspective] → comparison worker
+  [web_search]        → mini research agent (PLAN → SEARCH → READ → GAP)
+                        → sourced findings: FACT (high): ... [source: url]
+  [pre_analysis]      → domain-aware worker (code / math / creative / …)
+                        → structured markdown: ## Invariants, ## Edge cases, …
+  [multi_perspective] → domain-aware worker
+                        → per-option: Claim / Evidence / Cost / Who-it-fits
 
-  → Brain gets enriched context, responds with current data
+  → Brain gets structured, sourced context injected as labelled sections
 ```
+
+Each enrichment has a hard time budget and degrades gracefully — if research times out it falls back to raw snippets; if a worker fails, the other sections still reach the brain. The request is never blocked by a slow worker.
 
 ### Built-in reliability
 
@@ -285,8 +312,9 @@ Without tools, SmartSplit goes straight to triage: **TRANSPARENT** (forward dire
 | **Circuit breaker** | 5 failures in 2 min → provider auto-disabled with exponential backoff |
 | **Quality gates** | Detects refusals ("I cannot...") → auto-escalation to next provider |
 | **Fallback chains** | Provider fails → next best one takes over, seamlessly |
+| **Research budget** | Mini research agent capped at 7 s; each step (plan/search/read/gap) degrades to the previous one on timeout — never blocks the request |
 | **Pattern learning** | Learns from actual tool calls (Wilson score) → better predictions over time |
-| **Adaptive scoring** | Learns which providers work best from real results (MAB/UCB1) |
+| **Adaptive scoring** | Learns which providers work best from real results (MAB/UCB1), per-domain when a `reasoning.<domain>` row is configured |
 
 ---
 
@@ -330,22 +358,24 @@ More providers = better routing, more fallbacks, higher resilience.
 
 > **Format translation is automatic.** Most providers use the OpenAI format natively. Gemini uses Google's own format — SmartSplit translates on the fly. Your client talks OpenAI, SmartSplit handles the rest.
 
-> **Paid providers** (Anthropic, OpenAI) are also supported as optional fallbacks. They're disabled by default.
+> **Paid providers** (DeepSeek, Anthropic, OpenAI, Perplexity) work as brain *or* worker alongside free ones. Put them in `worker_priority` and the router uses them wherever their score wins. Disabled by default — enable in config or set the corresponding env var.
 
 <details>
 <summary><b>Routing table</b></summary>
 
+Ranked by competence score. Paid providers are marked `(paid)` — they compete on merit and are picked only when scoring wins (and the key is configured).
+
 ```
-Task          Best free providers (ranked)
-─────────────────────────────────────────────
-code          OpenRouter > Cerebras = Gemini > Groq = HuggingFace
-reasoning     Cerebras > Gemini = OpenRouter > Groq
-summarize     Cerebras > Groq = Gemini = Mistral = OpenRouter
-translation   Mistral > Gemini > Groq = Cerebras
-web search    Serper or Tavily
-boilerplate   Cerebras = Groq > Gemini = Mistral = OpenRouter
-math          OpenRouter = Gemini > Cerebras > Groq
-general       Cerebras > Gemini = OpenRouter > Groq = Mistral
+Task          Best workers (ranked)
+─────────────────────────────────────────────────────────────────────
+code          OpenRouter = DeepSeek (paid) > Anthropic = OpenAI (paid) > Cerebras = Gemini > Groq
+reasoning     Cerebras = DeepSeek (paid) = Anthropic = OpenAI (paid) > Gemini = OpenRouter > Groq
+summarize     Cerebras = DeepSeek (paid) = Anthropic (paid) > Groq = Gemini = Mistral = OpenRouter
+translation   Mistral > Gemini = DeepSeek = Anthropic = OpenAI (paid) > Groq = Cerebras
+web search    Perplexity (paid) > Serper = Tavily
+boilerplate   Groq = Cerebras = DeepSeek (paid) > Gemini = Mistral = OpenRouter
+math          DeepSeek (paid) > Anthropic = OpenAI (paid) > OpenRouter = Gemini > Cerebras > Groq
+general       Cerebras = DeepSeek (paid) = Anthropic (paid) > Gemini = OpenRouter > Groq = Mistral
 
 Backups:      HuggingFace, Cloudflare (lower quality, high availability)
 ```
@@ -394,7 +424,8 @@ Add `DEBUG=1` before any make command — works everywhere:
 ```bash
 DEBUG=1 make run          # API mode, verbose logs
 DEBUG=1 make proxy        # proxy mode, verbose logs
-DEBUG=1 make docker-up    # Docker, verbose logs
+DEBUG=1 make up           # Docker API mode, verbose logs
+DEBUG=1 make up-proxy     # Docker proxy mode, verbose logs
 ```
 
 Logs provider scores, triage decisions, prediction details, and worker results. Useful for troubleshooting routing or sharing logs with the team.
@@ -414,7 +445,9 @@ You can also tune provider settings and routing:
 ```json
 {
   "mode": "balanced",
-  "free_llm_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
+  "worker_priority": ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"],
+  "research_budget_seconds": 7.0,
+  "research_enabled": true,
   "providers": {
     "groq": {
       "model": "llama-3.3-70b-versatile",
@@ -430,7 +463,9 @@ You can also tune provider settings and routing:
 
 | Option | Default | What it does |
 |--------|---------|-------------|
-| `free_llm_priority` | cerebras, groq, gemini, openrouter, mistral, huggingface, cloudflare | Fallback order for free LLM calls |
+| `worker_priority` | cerebras, groq, gemini, openrouter, mistral, huggingface, cloudflare | Fallback order for worker LLM calls. Paid providers (DeepSeek, OpenAI, ...) are welcome here. |
+| `research_budget_seconds` | `7.0` | Total wall-clock budget for the mini research agent (PLAN + SEARCH + READ + optional GAP). Also settable via `SMARTSPLIT_RESEARCH_BUDGET`. |
+| `research_enabled` | `true` | Kill switch for the mini research agent — set to `false` to skip the research pipeline entirely. Also settable via `SMARTSPLIT_RESEARCH_ENABLED`. |
 | `providers.*.model` | per-provider default | Override the default model |
 | `providers.*.temperature` | `0.3` | LLM temperature |
 | `providers.*.max_tokens` | `4096` | Max output tokens |
@@ -493,27 +528,38 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```
 smartsplit/
-  pipeline.py             Starlette app + SmartSplit pipeline (agent/API modes)
-  proxy.py                HTTPS proxy — TLS interception, CONNECT tunneling
-  intercept.py            Shared interception logic — compression, prediction
-  detector.py             Request triage — TRANSPARENT or ENRICH (keywords + LLM)
-  intention_detector.py   Predicts tool calls (rules + patterns + LLM)
-  tool_anticipator.py     Executes anticipated tools locally (safe reads only)
-  tool_pattern_learner.py Learns from actual tool calls (Wilson score)
-  tool_registry.py        Single source of truth for tool definitions + categories
-  enrichment.py           ENRICH path — workers search, analyze, compare
-  formats.py              OpenAI/Anthropic format conversion + SSE streaming
-  planner.py              Domain detection + prompt decomposition
-  router.py               Provider scoring + routing + quality gates
-  learning.py             MAB (UCB1) adaptive scoring
-  quota.py                Usage tracking + savings report
-  config.py               Configuration + brain auto-detection + env vars
-  models.py               Pydantic models + StrEnum
-  exceptions.py           Custom error hierarchy
-  providers/              One file per provider (3 lines for OpenAI-compatible)
+  cli.py                    CLI entry point — argument parsing, mode dispatch
+  config.py                 Configuration + brain auto-detection + env vars
+  models.py                 Pydantic models + StrEnum
+  exceptions.py             Custom error hierarchy
+  json_utils.py             Shared JSON helpers
+  proxy/
+    server.py               HTTPS proxy — TLS interception, CONNECT tunneling
+    pipeline.py             Starlette app + SmartSplit pipeline (agent/API modes)
+    intercept.py            Shared interception logic — compression, prediction
+    formats.py              OpenAI/Anthropic format conversion + SSE streaming
+  tools/
+    registry.py             Single source of truth for tool definitions + categories
+    intention_detector.py   Predicts tool calls (rules + patterns + LLM)
+    anticipator.py          Executes anticipated tools locally (safe reads only)
+    pattern_learner.py      Learns from actual tool calls (Wilson score)
+    anticipation.py         Tool anticipation helpers
+  triage/
+    detector.py             Request triage — TRANSPARENT or ENRICH (keywords + LLM)
+    planner.py              Domain detection + prompt decomposition
+    enrichment.py           ENRICH path — orchestrates research agent + analysis workers, injects structured sections into the brain prompt
+    enrichment_prompts.py   Domain-specialized templates for pre_analysis / multi_perspective (code, math, creative, writing, factual)
+    research.py             Mini research agent — PLAN → SEARCH → READ → GAP with time budget + graceful degradation
+    research_prompts.py     Prompts for the research agent (plan queries, synthesize findings, gap-fill)
+    i18n_keywords.py        Multilingual keyword translations (generated)
+  routing/
+    router.py               Provider scoring + routing + quality gates
+    learning.py             MAB (UCB1) adaptive scoring
+    quota.py                Usage tracking + savings report
+  providers/                One file per provider (most are 2 lines)
 ```
 
-Adding a new provider is **2 lines** (model is set in config):
+A new OpenAI-compatible provider is just 2 lines:
 
 ```python
 class NewProvider(OpenAICompatibleProvider):
@@ -521,18 +567,29 @@ class NewProvider(OpenAICompatibleProvider):
     api_url = "https://api.new.com/v1/chat/completions"
 ```
 
+Plus a few config entries (default model, env var, competence scores) — see [CLAUDE.md](CLAUDE.md) for the full checklist.
+
 ---
 
-## Disclaimer
+## Ready to multiply your coding assistant?
+
+```bash
+pip install smartsplit
+```
+
+**[⭐ Star the repo](https://github.com/dsteinberger/smartsplit)** · [🐛 Report issues](https://github.com/dsteinberger/smartsplit/issues) · [💬 Discussions](https://github.com/dsteinberger/smartsplit/discussions)
+
+<details>
+<summary><b>Disclaimer</b></summary>
 
 SmartSplit is a personal development tool. Each user must provide their own API keys and comply with the terms of service of each provider they use. SmartSplit does not store, share, or redistribute API keys or access. The authors are not responsible for any misuse or ToS violations by end users.
+
+</details>
 
 ---
 
 <div align="center">
 
 MIT License · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
-
-**[Star this repo](https://github.com/dsteinberger/smartsplit)** to follow updates — new providers, streaming, and more coming soon.
 
 </div>

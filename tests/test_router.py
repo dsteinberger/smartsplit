@@ -115,6 +115,81 @@ class TestScoring:
         assert score > 0
 
 
+# ── Domain-aware competence scoring ─────────────────────────
+
+
+class TestDomainAwareScoring:
+    """When a Subtask carries a domain hint, the router should prefer the
+    ``reasoning.<domain>`` competence row over the generic ``reasoning`` row."""
+
+    def _build_router(self, make_config, tmp_path, table):
+        config = make_config(["groq", "gemini"])
+        config.competence_table = table
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        return Router(registry, quota, config, bandit=None)
+
+    def test_domain_specific_row_wins_over_generic(self, make_config, tmp_path):
+        """reasoning.math score for gemini (9) > generic reasoning score (4) → domain row wins."""
+        table = {
+            "reasoning": {"groq": 9, "gemini": 4},
+            "reasoning.math": {"groq": 4, "gemini": 9},  # inverted for clarity
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(type=TaskType.REASONING, content="prove", complexity=Complexity.HIGH, domain="math")
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        # gemini should now win because its reasoning.math score (9) beats groq's (4)
+        assert score_gemini > score_groq
+
+    def test_without_domain_uses_generic_row(self, make_config, tmp_path):
+        """Same providers, no domain hint → generic row applies."""
+        table = {
+            "reasoning": {"groq": 9, "gemini": 4},
+            "reasoning.math": {"groq": 4, "gemini": 9},
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(type=TaskType.REASONING, content="prove", complexity=Complexity.HIGH)  # no domain
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        # groq should win because generic reasoning favors it (9 vs 4)
+        assert score_groq > score_gemini
+
+    def test_missing_domain_row_falls_back_to_generic(self, make_config, tmp_path):
+        """Domain hint present but no dedicated row → fallback to generic reasoning row."""
+        table = {
+            "reasoning": {"groq": 9, "gemini": 4},  # groq favored generically
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(
+            type=TaskType.REASONING,
+            content="x",
+            complexity=Complexity.HIGH,
+            domain="math",  # no reasoning.math row exists
+        )
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        # Falls back to generic → groq wins
+        assert score_groq > score_gemini
+
+    def test_partial_domain_row_falls_back_per_provider(self, make_config, tmp_path):
+        """reasoning.math exists but only defines gemini — groq falls back to generic row."""
+        table = {
+            "reasoning": {"groq": 8, "gemini": 6},
+            "reasoning.math": {"gemini": 10},  # only gemini listed
+            "general": {"groq": 5, "gemini": 5},
+        }
+        router = self._build_router(make_config, tmp_path, table)
+        subtask = Subtask(type=TaskType.REASONING, content="x", complexity=Complexity.HIGH, domain="math")
+        # gemini reads 10 from reasoning.math; groq reads 8 from reasoning (fallback).
+        score_gemini = router.score("gemini", ProviderType.FREE, subtask, Mode.BALANCED)
+        score_groq = router.score("groq", ProviderType.FREE, subtask, Mode.BALANCED)
+        assert score_gemini > score_groq
+
+
 # ── Routing ──────────────────────────────────────────────────
 
 
@@ -527,3 +602,124 @@ class TestProviderOverrides:
         """Config without overrides should have empty dict."""
         config = make_config(["groq"])
         assert config.overrides == {}
+
+
+# ── Fast-model retry, context errors, refusal check ──────────
+
+
+class TestFastModelRetryAndContextErrors:
+    @pytest.mark.asyncio
+    async def test_strong_fails_fast_succeeds(self, make_config, tmp_path):
+        """Strong model throws ProviderError → router retries the fast model on the same provider."""
+        config = make_config(["anthropic"], mode=Mode.QUALITY)
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        provider = registry.get("anthropic")
+        strong_model = config.providers["anthropic"].strong_model or "claude-sonnet-4-6-20250514"
+        provider.config.strong_model = strong_model
+        provider.config.fast_model = "claude-haiku-fast"
+
+        def _mock_complete(prompt, model=None, messages=None, **_kw):
+            if model == strong_model:
+                raise ProviderError("anthropic", "boom")
+            return (
+                "fast model rescue that is long enough to pass quality gate",
+                TokenUsage(prompt_tokens=1, completion_tokens=2),
+            )
+
+        provider.complete = AsyncMock(side_effect=_mock_complete)
+        subtask = Subtask(type=TaskType.CODE, content="write code", complexity=Complexity.HIGH)
+        result = await router.route(subtask, mode=Mode.QUALITY)
+        assert result.provider == "anthropic"
+        assert "fast model rescue" in result.response
+
+    @pytest.mark.asyncio
+    async def test_strong_and_fast_both_fail(self, make_config, tmp_path):
+        """Strong AND fast model fail → provider marked failed, circuit breaker records failure."""
+        config = make_config(["anthropic", "groq"], mode=Mode.QUALITY)
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        anthropic = registry.get("anthropic")
+        anthropic.config.strong_model = "claude-sonnet-4-6-20250514"
+        anthropic.config.fast_model = "claude-haiku-fast"
+        anthropic.complete = AsyncMock(side_effect=ProviderError("anthropic", "down"))
+
+        groq = registry.get("groq")
+        groq.complete = AsyncMock(
+            return_value=("groq fallback response long enough to pass quality gate", TokenUsage())
+        )
+
+        subtask = Subtask(type=TaskType.CODE, content="write code", complexity=Complexity.HIGH)
+        result = await router.route(subtask, mode=Mode.QUALITY)
+        assert result.provider == "groq"
+
+    @pytest.mark.asyncio
+    async def test_context_too_long_does_not_penalize(self, make_config, tmp_path):
+        """`context length exceeded` → try next provider, do NOT record circuit-breaker failure."""
+        config = make_config(["groq", "gemini"])
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Gemini is scored higher for reasoning → tried first. Make it fail on context, groq succeeds.
+        gemini = registry.get("gemini")
+        gemini.complete = AsyncMock(side_effect=ProviderError("gemini", "context length exceeded"))
+        groq = registry.get("groq")
+        long_response = "A proper reasoning answer " + ("x" * 400)
+        groq.complete = AsyncMock(return_value=(long_response, TokenUsage()))
+
+        subtask = Subtask(type=TaskType.REASONING, content="big prompt", complexity=Complexity.LOW)
+        result = await router.route(subtask)
+        assert result.provider == "groq"
+        # Context error should NOT trip the breaker for gemini
+        assert registry.circuit_breaker.is_healthy("gemini")
+        assert any(e.reason == "context_too_long" for e in result.escalations)
+
+    @pytest.mark.asyncio
+    async def test_refusal_check_escalates(self, make_config, tmp_path):
+        """LLM refusal detected on a mid-length response → escalate to next provider."""
+        config = make_config(["groq", "gemini"])
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Response in the 50-300 char window that passes pattern check but is a refusal
+        ambiguous = "Ok, here is something: actually I am not going to complete that particular task"
+        registry.get("groq").complete = AsyncMock(return_value=(ambiguous, TokenUsage()))
+        registry.get("gemini").complete = AsyncMock(
+            return_value=("A proper answer that clearly passes the quality gate and is long enough", TokenUsage())
+        )
+        # Force LLM refusal check to return True for groq's response
+        registry.call_worker_llm = AsyncMock(return_value="yes")
+
+        subtask = Subtask(type=TaskType.REASONING, content="explain recursion", complexity=Complexity.MEDIUM)
+        result = await router.route(subtask)
+        assert result.provider == "gemini"
+        assert any(e.reason == "llm_refusal_check" for e in result.escalations)
+
+    @pytest.mark.asyncio
+    async def test_messages_are_rewritten_with_enriched_content(self, make_config, tmp_path):
+        """When a subtask carries messages, the router overwrites the last user message with subtask.content."""
+        config = make_config(["groq"])
+        registry = ProviderRegistry(config.providers, httpx.AsyncClient())
+        quota = QuotaTracker(provider_configs=config.providers, persistence_path=str(tmp_path / "q.json"))
+        router = Router(registry, quota, config)
+
+        # Response > 300 chars so the refusal-check LLM path is skipped (otherwise
+        # call_args would capture the refusal-check call, not the routing call).
+        long_response = "A detailed reasoning answer " + ("x" * 400)
+        mock = AsyncMock(return_value=(long_response, TokenUsage()))
+        registry.get("groq").complete = mock
+
+        subtask = Subtask(
+            type=TaskType.REASONING,
+            content="ENRICHED content",
+            complexity=Complexity.LOW,
+            messages=[{"role": "user", "content": "original user prompt"}],
+        )
+        await router.route(subtask)
+        assert mock.call_args.kwargs["messages"][-1] == {"role": "user", "content": "ENRICHED content"}

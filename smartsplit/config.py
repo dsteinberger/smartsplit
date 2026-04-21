@@ -8,6 +8,7 @@ Supports three config sources (lowest → highest priority):
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -37,7 +38,7 @@ class ProviderConfig(BaseModel):
     context_tier: ContextTier = ContextTier.SMALL
 
 
-DEFAULT_FREE_LLM_PRIORITY = ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"]
+DEFAULT_WORKER_PRIORITY = ["cerebras", "groq", "gemini", "openrouter", "mistral", "huggingface", "cloudflare"]
 
 # Brain priority: paid first (best quality), then free by capability.
 _BRAIN_PRIORITY = ["anthropic", "openai", "deepseek", "groq", "gemini", "openrouter", "mistral", "cerebras"]
@@ -50,10 +51,18 @@ class SmartSplitConfig(BaseModel):
     brain: str = Field(default="", description="Main LLM provider. Auto-detected if empty.")
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     competence_table: dict[str, dict[str, int]] = Field(default_factory=dict)
-    free_llm_priority: list[str] = Field(default_factory=lambda: list(DEFAULT_FREE_LLM_PRIORITY))
+    worker_priority: list[str] = Field(default_factory=lambda: list(DEFAULT_WORKER_PRIORITY))
     overrides: dict[str, str] = Field(
         default_factory=dict,
         description="Force a specific provider for a task type. Example: {'code': 'anthropic'}",
+    )
+    research_budget_seconds: float = Field(
+        default=7.0,
+        description="Total time budget (seconds) for the mini research agent pipeline.",
+    )
+    research_enabled: bool = Field(
+        default=True,
+        description="Kill switch for the mini research agent — set False to fall back to one-shot web_search.",
     )
 
 
@@ -348,6 +357,57 @@ DEFAULT_COMPETENCE_TABLE: dict[str, dict[str, int]] = {
         "openai:fast": 7,
         "openai:strong": 8,
     },
+    # ── Domain-specific reasoning scores ─────────────────────
+    # These rows override the generic "reasoning" score when the subtask
+    # carries a matching domain hint. Providers absent from a row fall
+    # back to the generic "reasoning" score, so rows can stay sparse.
+    "reasoning.code": {
+        "deepseek:strong": 10,  # deepseek-reasoner shines on code analysis
+        "deepseek:fast": 9,
+        "openrouter": 9,  # qwen3-coder free
+        "gemini": 9,
+        "anthropic:strong": 9,
+        "openai:strong": 9,
+        "mistral": 6,
+        "cerebras": 8,  # qwen: solid code reasoning
+        "groq": 7,
+    },
+    "reasoning.math": {
+        "deepseek:strong": 10,
+        "openai:strong": 10,
+        "gemini": 9,
+        "anthropic:strong": 8,
+        "cerebras": 7,
+        "mistral": 4,
+        "groq": 5,
+    },
+    "reasoning.creative": {
+        "anthropic:strong": 10,  # Claude: strongest creative reasoning
+        "anthropic:fast": 7,
+        "openai:strong": 8,
+        "mistral": 7,
+        "gemini": 7,
+        "cerebras": 6,
+        "groq": 5,
+    },
+    "reasoning.writing": {
+        "anthropic:strong": 10,
+        "anthropic:fast": 7,
+        "mistral": 7,
+        "openai:strong": 8,
+        "cerebras": 7,
+        "gemini": 8,
+        "groq": 6,
+    },
+    "reasoning.factual": {
+        "perplexity:strong": 9,  # grounded in web search
+        "perplexity:fast": 8,
+        "gemini": 9,
+        "anthropic:strong": 9,
+        "openai:strong": 8,
+        "cerebras": 7,
+        "mistral": 6,
+    },
 }
 
 # ── Env-var mapping ──────────────────────────────────────────
@@ -395,7 +455,7 @@ def load_config() -> SmartSplitConfig:
     # Layer 2: JSON file
     config_path = find_config_path()
     if config_path.exists():
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             _deep_merge(raw, json.load(f))
 
     # Layer 3: environment variables
@@ -406,6 +466,15 @@ def load_config() -> SmartSplitConfig:
     brain_env = os.environ.get("SMARTSPLIT_BRAIN")
     if brain_env:
         raw["brain"] = brain_env
+
+    research_budget_env = os.environ.get("SMARTSPLIT_RESEARCH_BUDGET")
+    if research_budget_env:
+        with contextlib.suppress(ValueError):
+            raw["research_budget_seconds"] = float(research_budget_env)
+
+    research_enabled_env = os.environ.get("SMARTSPLIT_RESEARCH_ENABLED")
+    if research_enabled_env is not None:
+        raw["research_enabled"] = research_enabled_env.lower() not in ("0", "false", "no", "off")
 
     for env_var, provider_name in _ENV_KEY_MAP.items():
         api_key = os.environ.get(env_var)

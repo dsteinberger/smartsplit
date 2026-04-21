@@ -10,7 +10,7 @@ SmartSplit operates in two modes based on the incoming request:
 
 **Mode Agent** (request contains `tools`) — predict tool calls and save round-trips:
 ```
-Client (with tools) → IntentionDetector predicts tool calls (free LLM)
+Client (with tools) → IntentionDetector predicts tool calls (worker LLM)
                      → High confidence (≥0.85): FAKE tool_use (skip brain)
                      → Enrichment: web search, pre-analysis (if triggered)
                      → Request proxied to brain WITH tools preserved
@@ -39,7 +39,7 @@ smartsplit/
     formats.py            # OpenAI/Anthropic format conversion, SSE streaming, fake tool responses
   tools/
     registry.py           # Single source of truth for all tool definitions, aliases, categories, regex
-    intention_detector.py # Predicts read-only tool calls via rules + free LLM (SAFE_TOOLS filter, 0.85 threshold)
+    intention_detector.py # Predicts read-only tool calls via rules + worker LLM (SAFE_TOOLS filter, 0.85 threshold)
     anticipator.py        # Executes anticipated tools locally (used in API mode only, not proxy mode)
     pattern_learner.py    # Learns from actual tool calls (Wilson score, 5 pattern types, staleness decay)
     anticipation.py       # Tool anticipation helpers — predict, filter, extract context
@@ -54,7 +54,7 @@ smartsplit/
     quota.py              # Usage tracking, availability scores, savings report
   providers/
     base.py              # ABC: LLMProvider, SearchProvider (Strategy pattern)
-    registry.py          # Factory + lookup + call_brain + call_free_llm + circuit breaker
+    registry.py          # Factory + lookup + call_brain + call_worker_llm + circuit breaker
     groq.py / gemini.py / deepseek.py / mistral.py / cerebras.py / openrouter.py
     huggingface.py / cloudflare.py  # Free backup providers
     anthropic.py / openai.py   # Paid providers (optional)
@@ -132,7 +132,7 @@ All tool definitions live in `smartsplit/tools/registry.py` — the **single sou
 3. Add default config in `DEFAULT_PROVIDERS` in `config.py`
 4. Add env var mapping in `_ENV_KEY_MAP` in `config.py`
 5. Add scores in `DEFAULT_COMPETENCE_TABLE` in `config.py`
-6. Add to `DEFAULT_FREE_LLM_PRIORITY` in `config.py` if it's a free LLM
+6. Add to `DEFAULT_WORKER_PRIORITY` in `config.py` (paid providers welcome — they compete with free ones for worker calls)
 7. Write tests, run the suite
 
 ## Don't

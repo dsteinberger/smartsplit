@@ -1,9 +1,9 @@
 name: Provider Watch (Daily)
 
 on:
-  schedule:
-    # Every day at 8:00 UTC
-    - cron: "0 8 * * *"
+  # Daily schedule disabled while repo is on standby — re-enable by uncommenting.
+  # schedule:
+  #   - cron: "0 8 * * *"
   workflow_dispatch: # Manual trigger
 
 env:
